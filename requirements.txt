@@ -1,0 +1,4 @@
+# Runs the app
+customtkinter>=5.2,<7
+# Builds the .exe
+pyinstaller>=6.0,<7

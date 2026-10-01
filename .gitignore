@@ -1,0 +1,18 @@
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors
+.idea/
+.vscode/
+
+# Windows
+Thumbs.db
+desktop.ini
