@@ -40,7 +40,7 @@ import customtkinter as ctk
 
 # ------------------------------------------------------------------ settings
 APP_NAME = "Foto Nxënësit"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 TXT_ENCODING = "utf-8-sig"  # UTF-8 with BOM: ë and ç show correctly in Notepad, Word and Excel
 AUTO_CAPITALIZE = True      # "arta krasniqi" is saved as "Arta Krasniqi"
 DRAFT_FILE = "_klasa e papërfunduar.txt"  # autosave of the class in progress, inside the school folder
@@ -884,7 +884,7 @@ class App(ctk.CTk):
                     preview.configure(text=f"Kjo klasë ekziston dhe ka {count_names(existing)}. "
                                            "Do të pyeteni çfarë të bëni me to.", text_color=AMBER)
                 else:
-                    preview.configure(text=f"Ruhet te: {self.school_dir.name}{os.sep}{folder}{os.sep}{folder}.txt",
+                    preview.configure(text=f"Ruhet te: {self.school_dir / folder / (folder + '.txt')}",
                                       text_color=GRAPHITE)
 
         modal.watch(field, update_preview)

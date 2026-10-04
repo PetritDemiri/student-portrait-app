@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0 – 2026-10-04
+
+### Changed
+- The finish-class dialog shows the full path where the class file will be saved, not just the part from the school folder on.
+
 ## 1.1.0 – 2026-10-01
 
 ### Added
