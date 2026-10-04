@@ -47,7 +47,7 @@ import customtkinter as ctk
 
 # ------------------------------------------------------------------ settings
 APP_NAME = "Foto Nxënësit"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 TXT_ENCODING = "utf-8-sig"  # UTF-8 with BOM: ë and ç show correctly in Notepad, Word and Excel
 AUTO_CAPITALIZE = True      # "arta krasniqi" is saved as "Arta Krasniqi"
 DRAFT_FILE = "_klasa e papërfunduar.txt"  # autosave of the class in progress, inside the school folder
@@ -456,6 +456,7 @@ class Modal:
         self.width = width
         self.validate = None      # optional: function(key) -> error text or None
         self.focus_widget = None  # optional: widget that gets the keyboard focus
+        self.actions = {}         # optional: key -> function that runs without closing the dialog
         self.result = None
         self._done = tk.BooleanVar(master=app, value=False)
         self._opened_at = 0.0
@@ -537,6 +538,9 @@ class Modal:
 
     def choose(self, key: str) -> None:
         if self.result is not None:
+            return
+        if key in self.actions:
+            self.actions[key]()
             return
         if key != self.cancel and self.validate is not None:
             problem = self.validate(key)
@@ -1179,8 +1183,15 @@ class App(ctk.CTk):
         elif skipped:
             modal.add_text(f"Këta {len(skipped)} emra ishin tashmë në listë dhe nuk u shtuan përsëri: "
                            f"{', '.join(s.name for s in skipped)}.", color=AMBER, size=14, pady=(12, 0))
-        if self.ask(modal) == "open":
-            self._open(path.parent)
+
+        def open_class_folder():
+            try:
+                open_folder(path.parent)
+            except Exception as exc:
+                modal.show_error(f"Dosja nuk u hap: {exc}")
+
+        modal.actions["open"] = open_class_folder  # the dialog stays open until "Vazhdo me klasën tjetër"
+        self.ask(modal)
 
     def finish_school(self) -> None:
         """Close this school and go back to the start screen for the next one."""

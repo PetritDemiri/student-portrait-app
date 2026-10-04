@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.2 – 2026-10-04
+
+### Changed
+- In the "Klasa u ruajt" dialog, "Hap dosjen" opens the class folder and leaves the dialog open; only "Vazhdo me klasën tjetër" (or Enter) closes it.
+
 ## 1.3.1 – 2026-10-04
 
 ### Changed
