@@ -1,0 +1,6 @@
+# Test settings, the same way as in the other projects: typing "pytest" in this folder runs the tests.
+# The app itself is a single file and needs no packaging.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

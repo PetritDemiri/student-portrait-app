@@ -70,7 +70,7 @@ py -m PyInstaller --noconfirm --clean --onefile --windowed --name FotoNxenesit -
 
 The program ends up in `dist\FotoNxenesit.exe`. To run it from source instead: `py foto_nxenesit.py`.
 
-Tests for the sorting and the class files: `py -m unittest discover -s tests -v`
+Tests for the sorting and the class files: install pytest once with `py -m pip install -r requirements-dev.txt`, then type `pytest` in the project folder.
 
 GitHub Actions runs the tests and builds the `.exe` on every push to `main`. Pushing a tag that starts with `v` (for example `v1.0.0`) also publishes the `.exe` as a release.
 
