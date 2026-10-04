@@ -1,6 +1,6 @@
 # Foto Nxënësit
 
-A small Windows app for school badge photo sessions. Type each student's name, confirm that the portrait was taken, and when the class is done you get a text file with every name, one per line, sorted by the Albanian alphabet if you want.
+A small Windows app for school badge photo sessions. Type each student's name, confirm that the portrait was taken, and when the class is done you get a numbered class list with the date and time of every photo, sorted by the Albanian alphabet if you want.
 
 The interface is in Albanian. Student names never leave your computer.
 
@@ -9,8 +9,9 @@ The interface is in Albanian. Student names never leave your computer.
 ## How it works
 
 1. **School.** Type the school's name. A folder with that name is created in your Documents folder, or reused if it already exists.
-2. **Students.** Type a student's full name and press Enter. A badge preview asks whether the photo was taken: Enter adds the name to the class list, Esc keeps it in the field for later.
+2. **Students.** Type a student's full name and press Enter. A badge preview asks whether the photo was taken: Enter adds the name to the class list with the time, Esc keeps it in the field for later.
 3. **Finish the class.** Click *Përfundo klasën*, type the class name (X-1, X-2 …) and choose the order: Albanian alphabet or photographing order. The list is saved, and cleared for the next class.
+4. **Finish the school.** *Përfundo shkollën* shows how many classes and students were saved, then goes back to the start for the next school.
 
 ```
 Documents\
@@ -21,7 +22,17 @@ Documents\
         └── X-2.txt
 ```
 
-Class files are UTF-8 with Windows line endings, so ë and ç show correctly in Notepad, Word and Excel. If OneDrive manages your Documents folder, the school folder is created there.
+Each class file is a numbered list with the date and time each portrait was confirmed, ending with the class total:
+
+```
+1. Arta Krasniqi – 01.10.2026 09:42:17
+2. Besnik Gashi – 01.10.2026 09:43:05
+3. Çlirim Hoxha – 01.10.2026 09:44:51
+
+Gjithsej: 3 nxënës në klasën X-1
+```
+
+The files are UTF-8 with Windows line endings, so ë and ç show correctly in Notepad, Word and Excel. If OneDrive manages your Documents folder, the school folder is created there. The times come from the computer's clock: to match names to photos by time, set the camera's clock to the same time.
 
 ## Albanian alphabetical order
 
@@ -35,6 +46,7 @@ Digraphs count as single letters, so *Syla* comes before *Shala* and *Tushi* bef
 | --- | --- |
 | Enter | Add the student, or confirm the photo |
 | Esc | "Not yet" in the photo dialog, or clear the name field |
+| Alt+E / Alt+C | Type ë / ç (the ë and ç buttons under the name field do the same) |
 | Double-click or F2 | Edit the selected name |
 | Delete | Remove the selected name |
 
@@ -42,7 +54,7 @@ Digraphs count as single letters, so *Syla* comes before *Shala* and *Tushi* bef
 
 - The class in progress is saved after every change (`_klasa e papërfunduar.txt` in the school folder) and offered back the next time that school is opened, so a crash or an accidental close loses nothing.
 - A name that's already on the list shows a warning. It can still be added, since two students can share a name.
-- Saving a class that already has a list asks whether to add the new names to it (repeats are skipped) or replace it.
+- Saving a class that already has a list asks whether to add the new names to it (repeats are skipped) or replace it. Lists saved by version 1.0.0 are read too; their names simply have no time.
 - Characters Windows doesn't allow in folder names are converted: `"` becomes “ ”, and `/` `\` `:` become `-`, so *X/1* is saved as *X-1*.
 
 The `.exe` isn't code-signed, so the first launch may show "Windows protected your PC". Click **More info**, then **Run anyway**.
@@ -70,8 +82,11 @@ Two settings sit at the top of `foto_nxenesit.py`: `AUTO_CAPITALIZE` turns "arta
 
 1. Shkarkoni `FotoNxenesit.exe` nga [versioni i fundit](../../releases/latest) dhe hapeni. Nuk ka nevojë për instalim.
 2. Shkruani emrin e shkollës. Te Dokumentet krijohet një dosje me këtë emër.
-3. Për çdo nxënës shkruani emrin dhe mbiemrin, shtypni Enter dhe, pasi të bëhet fotografia, shtypni Enter përsëri.
-4. Kur mbaron klasa, shtypni **Përfundo klasën**, shkruani emrin e klasës (p.sh. X-1) dhe zgjidhni renditjen: sipas alfabetit shqip ose sipas radhës së fotografimit. Lista ruhet te `Dokumentet\<shkolla>\<klasa>\<klasa>.txt`, një emër për rresht.
+3. Për çdo nxënës shkruani emrin dhe mbiemrin, shtypni Enter dhe, pasi të bëhet fotografia, shtypni Enter përsëri. Programi shënon datën dhe orën e fotografisë.
+4. Kur mbaron klasa, shtypni **Përfundo klasën**, shkruani emrin e klasës (p.sh. X-1) dhe zgjidhni renditjen: sipas alfabetit shqip ose sipas radhës së fotografimit. Lista ruhet te `Dokumentet\<shkolla>\<klasa>\<klasa>.txt` me numra, me datën dhe orën e çdo fotografie dhe me numrin e nxënësve në fund.
+5. Kur mbaron shkolla, shtypni **Përfundo shkollën** për të kaluar te shkolla tjetër.
+
+Nëse tastiera nuk ka ë dhe ç, përdorni butonat nën fushën e emrit ose Alt+E dhe Alt+C.
 
 Lista ruhet automatikisht gjatë punës, kështu që emrat nuk humbin nëse programi mbyllet papritur. Emrat e nxënësve mbeten vetëm në kompjuterin tuaj.
 

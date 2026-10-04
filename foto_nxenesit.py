@@ -8,8 +8,10 @@ How it works
      was taken, the name is added to the current class list and the field is cleared.
   3. "Përfundo klasën" asks for the class name (X-1, X-2 ...) and the ordering
      (Albanian alphabet or photographing order), then writes
-     Documents\<school>\<class>\<class>.txt  with one full name per line
-     and clears the list for the next class.
+     Documents\<school>\<class>\<class>.txt  as a numbered list with the date and time
+     each portrait was confirmed, followed by the class total, and clears the list
+     for the next class.
+  4. "Përfundo shkollën" goes back to the start screen for the next school.
 
 Build a single .exe on Windows (in the folder that contains this file):
   py -m pip install --upgrade customtkinter pyinstaller
@@ -27,18 +29,22 @@ import sys
 import time
 import traceback
 import unicodedata
+from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 
 # ------------------------------------------------------------------ settings
 APP_NAME = "Foto Nxënësit"
+APP_VERSION = "1.1.0"
 TXT_ENCODING = "utf-8-sig"  # UTF-8 with BOM: ë and ç show correctly in Notepad, Word and Excel
 AUTO_CAPITALIZE = True      # "arta krasniqi" is saved as "Arta Krasniqi"
 DRAFT_FILE = "_klasa e papërfunduar.txt"  # autosave of the class in progress, inside the school folder
+STAMP_FORMAT = "%d.%m.%Y %H:%M:%S"  # date and time each portrait was confirmed, as written in class files
 
 # ------------------------------------------------------------------ look
 PAPER = "#ECF0F5"       # window background
@@ -178,33 +184,91 @@ def documents_dir() -> Path:
     return Path.home() / "Documents"
 
 
-def read_names(path: Path) -> list[str]:
+@dataclass
+class Student:
+    name: str
+    taken: datetime | None = None  # when the portrait was confirmed
+
+
+TOTAL_PREFIX = "Gjithsej:"
+_NUMBERED = re.compile(r"^\d+\s*[.)]\s*(.+)$")
+_STAMPED = re.compile(r"^(.+?)\s+[–-]\s+(\d{1,2}\.\d{1,2}\.\d{4})\s+(\d{1,2}:\d{2}(?::\d{2})?)$")
+
+
+def format_line(number: int, student: Student) -> str:
+    """One line of a class file:  12. Arta Krasniqi – 01.10.2026 09:42:17"""
+    line = f"{number}. {student.name}"
+    if student.taken is not None:
+        line += f" – {student.taken.strftime(STAMP_FORMAT)}"
+    return line
+
+
+def numbered_lines(students: list[Student]) -> list[str]:
+    return [format_line(i, student) for i, student in enumerate(students, 1)]
+
+
+def class_file_lines(students: list[Student], class_name: str) -> list[str]:
+    return numbered_lines(students) + ["", f"{TOTAL_PREFIX} {len(students)} nxënës në klasën {class_name}"]
+
+
+def _parse_stamp(day: str, clock: str) -> datetime | None:
+    for fmt in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M"):
+        try:
+            return datetime.strptime(f"{day} {clock}", fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_students(text: str) -> list[Student]:
+    """Read a class list written by any version of the program (or edited by hand).
+    Numbers, dates and the total line are recognised, so only the students remain."""
+    students = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(TOTAL_PREFIX):
+            continue
+        numbered = _NUMBERED.match(line)
+        if numbered:
+            line = numbered.group(1).strip()
+        taken = None
+        stamped = _STAMPED.match(line)
+        if stamped:
+            taken = _parse_stamp(stamped.group(2), stamped.group(3))
+            if taken is not None:
+                line = stamped.group(1).strip()
+        students.append(Student(line, taken))
+    return students
+
+
+def read_text(path: Path) -> str:
     data = path.read_bytes()
     for encoding in ("utf-8-sig", "cp1250"):
         try:
-            text = data.decode(encoding)
-            break
+            return data.decode(encoding)
         except UnicodeDecodeError:
             continue
-    else:
-        text = data.decode("latin-1")
-    return [line.strip() for line in text.splitlines() if line.strip()]
+    return data.decode("latin-1")
+
+
+def read_students(path: Path) -> list[Student]:
+    return parse_students(read_text(path))
 
 
 def count_names_in(path: Path) -> int:
     try:
-        return len(read_names(path)) if path.is_file() else 0
+        return len(read_students(path)) if path.is_file() else 0
     except OSError:
         return 0
 
 
-def write_names(path: Path, names: list[str]) -> None:
-    """Write one name per line (Windows line endings). A temporary file is renamed over the
-    old one, so an existing list is never left half-written."""
+def write_lines(path: Path, lines: list[str]) -> None:
+    """Write the lines with Windows line endings. A temporary file is renamed over the old one,
+    so an existing list is never left half-written."""
     tmp = path.with_name(path.name + ".tmp")
     try:
         with open(tmp, "w", encoding=TXT_ENCODING, newline="\r\n") as f:
-            f.write("\n".join(names))
+            f.write("\n".join(lines))
         for attempt in range(8):
             try:
                 os.replace(tmp, path)
@@ -219,33 +283,54 @@ def write_names(path: Path, names: list[str]) -> None:
                 tmp.unlink()
 
 
-def save_class(school_dir: Path, class_folder: str, names: list[str],
-               alphabetical: bool, merge: bool) -> tuple[Path, list[str], list[str]]:
-    """Create <school>/<class>/<class>.txt. With merge=True the new names are added to the names
-    already in the file (names already there are skipped). Returns (file, saved names, skipped)."""
+def save_class(school_dir: Path, class_folder: str, students: list[Student],
+               alphabetical: bool, merge: bool) -> tuple[Path, list[Student], list[Student]]:
+    """Create <school>/<class>/<class>.txt. With merge=True the new students are added to the ones
+    already in the file (names already there are skipped). Returns (file, saved list, skipped)."""
     class_dir = school_dir / class_folder
     class_dir.mkdir(parents=True, exist_ok=True)
     txt = class_dir / f"{class_folder}.txt"
-    final, skipped = list(names), []
+    final, skipped = list(students), []
     if merge and txt.is_file():
-        final = read_names(txt)
-        known = {same_name(n) for n in final}
-        for name in names:
-            if same_name(name) in known:
-                skipped.append(name)
+        final = read_students(txt)
+        known = {same_name(s.name) for s in final}
+        for student in students:
+            if same_name(student.name) in known:
+                skipped.append(student)
             else:
-                final.append(name)
+                final.append(student)
     if alphabetical:
-        final = sort_albanian(final)
-    write_names(txt, final)
+        final = sorted(final, key=lambda s: albanian_sort_key(s.name))
+    write_lines(txt, class_file_lines(final, class_folder))
     return txt, final, skipped
 
 
 def count_saved_classes(school_dir: Path) -> int:
+    return school_summary(school_dir)[0]
+
+
+def school_summary(school_dir: Path) -> tuple[int, int]:
+    """How many classes are saved in the school folder, and how many students they hold."""
+    classes = students = 0
     try:
-        return sum(1 for d in school_dir.iterdir() if d.is_dir() and (d / f"{d.name}.txt").is_file())
+        folders = [d for d in school_dir.iterdir() if d.is_dir()]
     except OSError:
-        return 0
+        return 0, 0
+    for folder in folders:
+        txt = folder / f"{folder.name}.txt"
+        if txt.is_file():
+            classes += 1
+            students += count_names_in(txt)
+    return classes, students
+
+
+def list_time(taken: datetime | None, today: date | None = None) -> str:
+    """How a photo time is shown in the app: only the time for today, date and time otherwise."""
+    if taken is None:
+        return ""
+    if taken.date() == (today or date.today()):
+        return taken.strftime("%H:%M:%S")
+    return taken.strftime("%d.%m. %H:%M:%S")
 
 
 def open_folder(path: Path) -> None:
@@ -389,20 +474,23 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
         super().__init__(fg_color=PAPER)
-        self.title(APP_NAME)
+        self.title(f"{APP_NAME} {APP_VERSION}")
         self._fonts: dict = {}
         self.modal: Modal | None = None
         self.screen = "school"
         self.documents = documents_dir()
         self.school_dir: Path | None = None
-        self.names: list[str] = []
+        self.students: list[Student] = []
         self.sort_choice = "alpha"
         self.draft_ok = True
-        # plain Tk widgets are not scaled by customtkinter, so the list font is sized in pixels here
-        self.list_font = tkfont.Font(self, family=UI_FONT,
-                                     size=-round(18 * ctk.ScalingTracker.get_widget_scaling(self)))
+        self.scale = ctk.ScalingTracker.get_widget_scaling(self)
+        # plain Tk widgets are not scaled by customtkinter, so their fonts are sized in pixels here
+        self.list_font = tkfont.Font(self, family=UI_FONT, size=-round(18 * self.scale))
+        self.list_head_font = tkfont.Font(self, family=UI_FONT_STRONG, size=-round(13 * self.scale),
+                                          weight=STRONG_WEIGHT)
 
         self._fit_window()
+        self._style_table()
         self._build_school_screen()
         self._build_class_screen()
         self._show_screen("school")
@@ -412,6 +500,8 @@ class App(ctk.CTk):
         self.bind("<Escape>", self._on_escape)
         self.bind("<Tab>", lambda e: "break" if self.modal else None)
         self.bind("<Key>", self._on_key)
+        for key, letter in (("e", "ë"), ("E", "Ë"), ("c", "ç"), ("C", "Ç")):
+            self.bind(f"<Alt-{key}>", lambda e, letter=letter: self._type_letter(letter))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(150, self.focus_input)
 
@@ -428,8 +518,9 @@ class App(ctk.CTk):
         return ctk.CTkLabel(parent, text=text, font=self.font(size, strong), text_color=color,
                             wraplength=wrap, anchor=anchor, justify=justify)
 
-    def button(self, parent, text: str, style: str, command, height: int = 48, size: int = 16) -> ctk.CTkButton:
-        return ctk.CTkButton(parent, text=text, command=command, height=height, corner_radius=8,
+    def button(self, parent, text: str, style: str, command, height: int = 48, size: int = 16,
+               width: int = 140) -> ctk.CTkButton:
+        return ctk.CTkButton(parent, text=text, command=command, height=height, width=width, corner_radius=8,
                              font=self.font(size, strong=True), **BUTTON_STYLES[style])
 
     def entry(self, parent, height: int, size: int, border: str = INK) -> ctk.CTkEntry:
@@ -437,8 +528,17 @@ class App(ctk.CTk):
                             border_color=border, fg_color=SHEET, text_color=TEXT)
 
     def rule(self, parent, color: str = RULE, height: int = 1) -> tk.Frame:
-        scale = ctk.ScalingTracker.get_widget_scaling(self)
-        return tk.Frame(parent, bg=color, height=max(1, round(height * scale)), bd=0, highlightthickness=0)
+        return tk.Frame(parent, bg=color, height=max(1, round(height * self.scale)), bd=0, highlightthickness=0)
+
+    def _letter_row(self, parent, field: ctk.CTkEntry) -> ctk.CTkFrame:
+        """ë and ç buttons for keyboards that don't have those keys."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        for letter in ("ë", "ç"):
+            ctk.CTkButton(row, text=letter, width=48, height=36, corner_radius=8, font=self.font(18, strong=True),
+                          command=lambda letter=letter: self._type_into(field, letter),
+                          **BUTTON_STYLES["plain"]).pack(side="left", padx=(0, 8))
+        self.label(row, "ose Alt+E dhe Alt+C", size=13, color=GRAPHITE).pack(side="left", padx=(4, 0))
+        return row
 
     def _fit_window(self) -> None:
         scale = ctk.ScalingTracker.get_window_scaling(self)
@@ -449,6 +549,20 @@ class App(ctk.CTk):
         y = max(0, int((screen_h - h * scale) / 2.4))
         self.geometry(f"{w}x{h}+{x}+{y}")
         self.minsize(min(860, w), min(560, h))
+
+    def _style_table(self) -> None:
+        s = self.scale
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("Klasa.Treeview", background=SHEET, fieldbackground=SHEET, foreground=TEXT,
+                        font=self.list_font, rowheight=round(34 * s), borderwidth=0, relief="flat")
+        style.map("Klasa.Treeview", background=[("selected", INK_TINT)], foreground=[("selected", TEXT)])
+        style.layout("Klasa.Treeview", [("Klasa.Treeview.treearea", {"sticky": "nswe"})])
+        style.configure("Klasa.Treeview.Heading", background=SHEET, foreground=GRAPHITE, font=self.list_head_font,
+                        relief="flat", borderwidth=0, bordercolor=SHEET, lightcolor=SHEET, darkcolor=SHEET,
+                        padding=(round(4 * s), round(8 * s)))
+        style.map("Klasa.Treeview.Heading", background=[("active", SHEET), ("pressed", SHEET)],
+                  relief=[("active", "flat"), ("pressed", "flat")])
 
     # ---------------------------------------------------------------- school screen
     def _build_school_screen(self) -> None:
@@ -465,8 +579,9 @@ class App(ctk.CTk):
         self.school_entry = self.entry(col, height=56, size=20)
         self.school_entry.pack(fill="x", pady=(4, 0))
         self.school_entry.bind("<KeyRelease>", self._update_school_preview)
+        self._letter_row(col, self.school_entry).pack(anchor="w", pady=(8, 0))
         self.school_path = self.label(col, "", size=13, color=GRAPHITE, wrap=width)
-        self.school_path.pack(fill="x", pady=(10, 0))
+        self.school_path.pack(fill="x", pady=(8, 0))
         self.school_state = self.label(col, "", size=13, color=GRAPHITE, wrap=width)
         self.school_state.pack(fill="x")
         self.button(col, "Vazhdo", "ink", self.submit_school, height=54, size=17).pack(fill="x", pady=(20, 0))
@@ -502,8 +617,8 @@ class App(ctk.CTk):
         except OSError as exc:
             return self._school_problem(f"Dosja nuk u krijua: {exc.strerror or exc}")
         self.school_dir = path
-        self.names = []
-        self.title(f"{APP_NAME} – {folder}")
+        self.students = []
+        self.title(f"{APP_NAME} {APP_VERSION} – {folder}")
         self._update_header()
         self._refresh_list()
         self.set_status("Shkruani emrin e nxënësit të parë.", "info")
@@ -512,7 +627,7 @@ class App(ctk.CTk):
 
     def _school_problem(self, text: str) -> None:
         self.school_state.configure(text=text, text_color=RED)
-        self._flash(self.school_entry, RULE)
+        self._flash(self.school_entry, INK)
         self.school_entry.focus_set()
 
     # ---------------------------------------------------------------- class screen
@@ -524,6 +639,8 @@ class App(ctk.CTk):
 
         head = ctk.CTkFrame(screen, fg_color="transparent")
         head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=36, pady=(22, 14))
+        self.button(head, "Përfundo shkollën", "plain", self.finish_school, height=40, size=14, width=170).pack(
+            side="right", padx=(12, 0))
         self.button(head, "Hap dosjen", "plain", self.open_school_folder, height=40, size=14).pack(
             side="right", padx=(20, 0))
         self.school_title = self.label(head, "", size=24, strong=True)
@@ -540,11 +657,11 @@ class App(ctk.CTk):
                    color=GRAPHITE).pack(fill="x", pady=(0, 10))
         self.student_entry = self.entry(left, height=64, size=26)
         self.student_entry.pack(fill="x")
+        self._letter_row(left, self.student_entry).pack(anchor="w", pady=(8, 0))
         self.button(left, "Shto nxënësin", "ink", self.add_student, height=56, size=18).pack(fill="x", pady=(12, 0))
         self.status = self.label(left, "", size=15, color=GRAPHITE, wrap=380)
         self.status.pack(fill="x", pady=(14, 0))
-        scale = ctk.ScalingTracker.get_widget_scaling(self)
-        left.bind("<Configure>", lambda e: self.status.configure(wraplength=max(200, int(e.width / scale) - 4)))
+        left.bind("<Configure>", lambda e: self.status.configure(wraplength=max(200, int(e.width / self.scale) - 4)))
         finish = ctk.CTkFrame(left, fg_color="transparent")
         finish.pack(side="bottom", fill="x", pady=(0, 6))
         self.rule(finish).pack(fill="x", pady=(0, 14))
@@ -552,7 +669,7 @@ class App(ctk.CTk):
         self.button(finish, "Përfundo klasën", "green", self.finish_class, height=56, size=18).pack(
             fill="x", pady=(6, 0))
 
-        # right: the list of the current class
+        # right: the current class, with the time each portrait was confirmed
         right = ctk.CTkFrame(screen, fg_color="transparent")
         right.grid(row=2, column=1, sticky="nsew", padx=(20, 36), pady=(22, 24))
         actions = ctk.CTkFrame(right, fg_color="transparent")
@@ -571,28 +688,34 @@ class App(ctk.CTk):
         self.label(top, "Klasa aktuale", size=18, strong=True).pack(side="left")
         self.rule(sheet).pack(fill="x", padx=1)
         holder = tk.Frame(sheet, bg=SHEET, bd=0, highlightthickness=0)
-        holder.pack(fill="both", expand=True, padx=(8, 6), pady=(6, 10))
-        self.listbox = tk.Listbox(holder, font=self.list_font, activestyle="none", bd=0, highlightthickness=0,
-                                  relief="flat", bg=SHEET, fg=TEXT, selectbackground=INK_TINT,
-                                  selectforeground=TEXT, exportselection=False)
-        scrollbar = ctk.CTkScrollbar(holder, command=self.listbox.yview, fg_color="transparent",
+        holder.pack(fill="both", expand=True, padx=(8, 6), pady=(2, 10))
+        s = self.scale
+        self.table = ttk.Treeview(holder, columns=("nr", "name", "time"), show="headings",
+                                  style="Klasa.Treeview", selectmode="browse")
+        for column, text, anchor in (("nr", "Nr.", "e"), ("name", "   Emri dhe mbiemri", "w"), ("time", "Koha  ", "e")):
+            self.table.heading(column, text=text, anchor=anchor)
+        self.table.column("nr", width=round(54 * s), minwidth=round(40 * s), stretch=False, anchor="e")
+        self.table.column("name", width=round(240 * s), minwidth=round(120 * s), stretch=True, anchor="w")
+        self.table.column("time", width=round(110 * s), minwidth=round(90 * s), stretch=False, anchor="e")
+        self.table.tag_configure("alt", background=ROW_ALT)
+        scrollbar = ctk.CTkScrollbar(holder, command=self.table.yview, fg_color="transparent",
                                      button_color=RULE, button_hover_color=GRAPHITE)
-        self.listbox.pack(side="left", fill="both", expand=True)
+        self.table.pack(side="left", fill="both", expand=True)
 
         def on_scroll(first, last):
             scrollbar.set(first, last)
             needed = float(first) > 0.0 or float(last) < 1.0
             if needed and not scrollbar.winfo_manager():
-                scrollbar.pack(side="right", fill="y", before=self.listbox)
+                scrollbar.pack(side="right", fill="y", before=self.table)
             elif not needed and scrollbar.winfo_manager():
                 scrollbar.pack_forget()
 
-        self.listbox.configure(yscrollcommand=on_scroll)
+        self.table.configure(yscrollcommand=on_scroll)
         self.empty_label = self.label(holder, "Ende nuk ka emra.\nNxënësit që shtoni shfaqen këtu, sipas radhës.",
                                       size=15, color=GRAPHITE, anchor="center", justify="center")
-        self.listbox.bind("<Double-Button-1>", lambda e: self.edit_selected())
-        self.listbox.bind("<F2>", lambda e: self.edit_selected())
-        self.listbox.bind("<Delete>", lambda e: self.delete_selected())
+        self.table.bind("<Double-Button-1>", self._on_table_double_click)
+        self.table.bind("<F2>", lambda e: self.edit_selected())
+        self.table.bind("<Delete>", lambda e: self.delete_selected())
 
     def _update_header(self) -> None:
         n = count_saved_classes(self.school_dir)
@@ -602,28 +725,39 @@ class App(ctk.CTk):
         self.school_info.configure(text=f"{self.school_dir}   ({saved})")
 
     def _refresh_list(self, select: int | None = None) -> None:
-        lb = self.listbox
-        lb.delete(0, "end")
-        digits = len(str(len(self.names)))
-        for i, name in enumerate(self.names, 1):
-            lb.insert("end", f"  {str(i).rjust(digits, FIGURE_SPACE)}.   {name}")
-            if i % 2 == 0:
-                lb.itemconfig("end", background=ROW_ALT)
-        if select is not None and 0 <= select < len(self.names):
-            lb.selection_set(select)
-            lb.activate(select)
-            lb.see(select)
-        elif self.names:
-            lb.see("end")
-        self.count_label.configure(text=f"{len(self.names)} nxënës")
-        if self.names:
+        table = self.table
+        table.delete(*table.get_children())
+        today = date.today()
+        shown_times = []
+        for i, student in enumerate(self.students):
+            shown = list_time(student.taken, today)
+            shown_times.append(shown)
+            table.insert("", "end", iid=str(i), values=(f"{i + 1}.", f"   {student.name}", f"{shown}  "),
+                         tags=("alt",) if i % 2 else ())
+        # a time from another day also shows its date, so the column grows to fit it
+        widest = max([self.list_font.measure(f"{t}  ") for t in shown_times] + [0])
+        table.column("time", width=max(round(110 * self.scale), widest + round(14 * self.scale)))
+        if select is not None and 0 <= select < len(self.students):
+            table.selection_set(str(select))
+            table.focus(str(select))
+            table.see(str(select))
+        elif self.students:
+            table.see(str(len(self.students) - 1))
+        self.count_label.configure(text=f"{len(self.students)} nxënës")
+        if self.students:
             self.empty_label.place_forget()
         else:
-            self.empty_label.place(relx=0.5, rely=0.42, anchor="center")
+            self.empty_label.place(relx=0.5, rely=0.45, anchor="center")
 
     def _selected(self) -> int | None:
-        selection = self.listbox.curselection()
-        return selection[0] if selection else None
+        selection = self.table.selection()
+        return int(selection[0]) if selection else None
+
+    def _on_table_double_click(self, event):
+        if self.table.identify_region(event.x, event.y) == "cell":
+            self.edit_selected()
+            return "break"
+        return None
 
     # ---------------------------------------------------------------- actions
     def add_student(self) -> None:
@@ -636,11 +770,11 @@ class App(ctk.CTk):
             self._flash(self.student_entry, INK)
             self.student_entry.focus_set()
             return
-        number = len(self.names) + 1
+        number = len(self.students) + 1
         modal = Modal(self, "A u bë fotografia?", default="yes", cancel="no",
                       buttons=[("no", "Jo ende (Esc)", "plain"), ("yes", "Po, u bë (Enter)", "green")])
         modal.add_badge(self.school_dir.name, name, f"Nr. {number} në listën e klasës")
-        twin = next((i for i, n in enumerate(self.names) if same_name(n) == same_name(name)), None)
+        twin = next((i for i, s in enumerate(self.students) if same_name(s.name) == same_name(name)), None)
         if twin is not None:
             modal.add_text(f"Ky emër është tashmë në listë (nr. {twin + 1}). Nëse është nxënës tjetër "
                            "me të njëjtin emër, vazhdoni.", color=AMBER, size=14, pady=(14, 0))
@@ -648,10 +782,11 @@ class App(ctk.CTk):
                        pady=(16, 0))
         if self.ask(modal) != "yes":
             return
-        self.names.append(name)
+        taken = datetime.now().replace(microsecond=0)
+        self.students.append(Student(name, taken))
         self._refresh_list()
         self.student_entry.delete(0, "end")
-        self._changed(f"U shtua: {name} (nr. {len(self.names)}).")
+        self._changed(f"U shtua në orën {taken:%H:%M:%S}: {name} (nr. {len(self.students)}).")
 
     def edit_selected(self) -> None:
         if self.modal is not None:
@@ -660,15 +795,17 @@ class App(ctk.CTk):
         if i is None:
             self.set_status("Zgjidhni një emër në listë, pastaj provoni përsëri.", "warn")
             return
+        old = self.students[i]
         modal = Modal(self, "Ndrysho emrin", default="save", cancel="cancel",
                       buttons=[("cancel", "Anulo", "plain"), ("save", "Ruaj emrin", "ink")])
-        modal.add_text(f"Nr. {i + 1} në listë.")
+        modal.add_text(f"Nr. {i + 1} në listë{self._taken_phrase(old.taken)}.")
         field = self.entry(modal.body, height=54, size=22)
         field.pack(fill="x", pady=(12, 0))
-        field.insert(0, self.names[i])
+        field.insert(0, old.name)
         field.select_range(0, "end")
         field.icursor("end")
         modal.watch(field)
+        self._letter_row(modal.body, field).pack(anchor="w", pady=(8, 0))
         chosen = {}
 
         def validate(_key):
@@ -676,11 +813,19 @@ class App(ctk.CTk):
             return None if chosen["name"] else "Emri nuk mund të jetë bosh."
 
         modal.validate, modal.focus_widget = validate, field
-        if self.ask(modal) != "save" or chosen["name"] == self.names[i]:
+        if self.ask(modal) != "save" or chosen["name"] == old.name:
             return
-        old, self.names[i] = self.names[i], chosen["name"]
+        self.students[i] = Student(chosen["name"], old.taken)  # the photo time stays the same
         self._refresh_list(select=i)
-        self._changed(f"Emri u ndryshua në {chosen['name']} (ishte {old}).")
+        self._changed(f"Emri u ndryshua në {chosen['name']} (ishte {old.name}).")
+
+    @staticmethod
+    def _taken_phrase(taken: datetime | None) -> str:
+        if taken is None:
+            return ""
+        if taken.date() == date.today():
+            return f", fotografuar në orën {taken:%H:%M:%S}"
+        return f", fotografuar më {taken:%d.%m.%Y} në orën {taken:%H:%M:%S}"
 
     def delete_selected(self) -> None:
         if self.modal is not None:
@@ -691,18 +836,18 @@ class App(ctk.CTk):
             return
         modal = Modal(self, "Të fshihet nga lista?", default="delete", cancel="cancel",
                       buttons=[("cancel", "Anulo", "plain"), ("delete", "Fshi", "red")])
-        modal.add_text(self.names[i], color=TEXT, size=22, strong=True, pady=(14, 0))
-        modal.add_text(f"Nr. {i + 1} në listë.", pady=(2, 0))
+        modal.add_text(self.students[i].name, color=TEXT, size=22, strong=True, pady=(14, 0))
+        modal.add_text(f"Nr. {i + 1} në listë{self._taken_phrase(self.students[i].taken)}.", pady=(2, 0))
         if self.ask(modal) != "delete":
             return
-        removed = self.names.pop(i)
-        self._refresh_list(select=min(i, len(self.names) - 1) if self.names else None)
-        self._changed(f"U fshi nga lista: {removed}.", "info")
+        removed = self.students.pop(i)
+        self._refresh_list(select=min(i, len(self.students) - 1) if self.students else None)
+        self._changed(f"U fshi nga lista: {removed.name}.", "info")
 
     def finish_class(self) -> None:
         if self.modal is not None or self.school_dir is None:
             return
-        if not self.names:
+        if not self.students:
             modal = Modal(self, "Lista është bosh", default="ok", cancel="ok",
                           buttons=[("ok", "Në rregull", "ink")])
             modal.add_text("Shtoni të paktën një nxënës para se ta përfundoni klasën.")
@@ -711,7 +856,8 @@ class App(ctk.CTk):
 
         modal = Modal(self, "Përfundo klasën", default="save", cancel="cancel",
                       buttons=[("cancel", "Anulo", "plain"), ("save", "Ruaj klasën", "green")])
-        modal.add_text(f"Lista ka {len(self.names)} nxënës. Emrat ruhen në një skedar .txt, një emër për rresht.")
+        modal.add_text(f"Lista ka {len(self.students)} nxënës. Emrat ruhen në një skedar .txt si listë me numra, "
+                       "bashkë me datën dhe orën e fotografimit.")
         self.label(modal.body, "Emri i klasës", size=15, strong=True).pack(fill="x", pady=(18, 4))
         field = self.entry(modal.body, height=52, size=20)
         field.pack(fill="x")
@@ -778,9 +924,9 @@ class App(ctk.CTk):
                 return
             merge = choice == "merge"
 
-        new_count = len(self.names)
+        new_count = len(self.students)
         try:
-            path, final, skipped = save_class(self.school_dir, folder, self.names, alphabetical, merge)
+            path, final, skipped = save_class(self.school_dir, folder, self.students, alphabetical, merge)
         except OSError as exc:
             modal = Modal(self, "Lista nuk u ruajt", default="ok", cancel="ok",
                           buttons=[("ok", "Në rregull", "ink")])
@@ -793,7 +939,7 @@ class App(ctk.CTk):
             self.ask(modal)
             return
 
-        self.names = []
+        self.students = []
         self._refresh_list()
         self._update_header()
         self._changed(f"Klasa {folder} u ruajt me {len(final)} nxënës.")
@@ -811,13 +957,49 @@ class App(ctk.CTk):
             modal.add_text(f"{len(final)} nxënës, renditur {how}.", color=TEXT)
         modal.add_text(str(path), size=13, pady=(4, 0))
         if len(skipped) == 1:
-            modal.add_text(f"Emri {skipped[0]} ishte tashmë në listë dhe nuk u shtua përsëri.",
+            modal.add_text(f"Emri {skipped[0].name} ishte tashmë në listë dhe nuk u shtua përsëri.",
                            color=AMBER, size=14, pady=(12, 0))
         elif skipped:
             modal.add_text(f"Këta {len(skipped)} emra ishin tashmë në listë dhe nuk u shtuan përsëri: "
-                           f"{', '.join(skipped)}.", color=AMBER, size=14, pady=(12, 0))
+                           f"{', '.join(s.name for s in skipped)}.", color=AMBER, size=14, pady=(12, 0))
         if self.ask(modal) == "open":
             self._open(path.parent)
+
+    def finish_school(self) -> None:
+        """Close this school and go back to the start screen for the next one."""
+        if self.modal is not None or self.school_dir is None:
+            return
+        classes, total = school_summary(self.school_dir)
+        unsaved = len(self.students)
+        modal = Modal(self, "Të përfundohet shkolla?", default="cancel" if unsaved else "finish", cancel="cancel",
+                      buttons=[("cancel", "Anulo", "plain"), ("finish", "Përfundo shkollën", "ink")])
+        modal.add_text(self.school_dir.name, color=INK, size=22, strong=True, pady=(12, 0))
+        if classes == 0:
+            summary = "Në këtë shkollë nuk është ruajtur ende asnjë klasë."
+        elif classes == 1:
+            summary = f"Në këtë shkollë është ruajtur 1 klasë me {total} nxënës."
+        else:
+            summary = f"Në këtë shkollë janë ruajtur {classes} klasa me {total} nxënës gjithsej."
+        modal.add_text(summary, color=TEXT)
+        if unsaved and self._save_draft():
+            modal.add_text(f"Klasa aktuale ka {unsaved} nxënës dhe ende nuk është ruajtur si klasë. Lista ruhet "
+                           "automatikisht dhe do t'ju ofrohet sërish kur ta hapni këtë shkollë.",
+                           color=AMBER, size=14, pady=(12, 0))
+        elif unsaved:
+            modal.add_text(f"Kujdes: lista aktuale ({unsaved} nxënës) nuk mund të ruhej automatikisht. "
+                           "Nëse e përfundoni shkollën tani, këta emra humbasin.", color=RED, size=14, pady=(12, 0))
+        modal.add_text("Pastaj kthehemi te fillimi, për shkollën tjetër.", pady=(12, 0))
+        if self.ask(modal) != "finish":
+            return
+        finished = self.school_dir.name
+        self.school_dir = None
+        self.students = []
+        self.title(f"{APP_NAME} {APP_VERSION}")
+        self.school_entry.delete(0, "end")
+        self._update_school_preview()
+        self.school_state.configure(text=f"Shkolla {finished} u përfundua. Shkruani emrin e shkollës tjetër.",
+                                    text_color=GREEN)
+        self._show_screen("school")
 
     def open_school_folder(self) -> None:
         if self.school_dir is not None:
@@ -829,14 +1011,38 @@ class App(ctk.CTk):
         except Exception as exc:
             self.set_status(f"Dosja nuk u hap: {exc}", "error")
 
+    # ---------------------------------------------------------------- ë and ç
+    def _type_into(self, field: ctk.CTkEntry, letter: str) -> None:
+        self._insert_letter(field._entry, letter)
+
+    def _type_letter(self, letter: str) -> str:
+        """Alt+E / Alt+C: type ë / ç into the field that has the cursor."""
+        widget = self.focus_get()
+        if isinstance(widget, tk.Entry):
+            target = widget
+        elif self.modal is None:
+            target = (self.student_entry if self.screen == "class" else self.school_entry)._entry
+        else:
+            return "break"
+        self._insert_letter(target, letter)
+        return "break"
+
+    @staticmethod
+    def _insert_letter(target: tk.Entry, letter: str) -> None:
+        target.focus_set()
+        if target.selection_present():
+            target.delete("sel.first", "sel.last")
+        target.insert("insert", letter)
+        target.event_generate("<KeyRelease>")  # refresh previews that follow the typing
+
     # ---------------------------------------------------------------- autosave of the current class
     def _draft_path(self) -> Path:
         return self.school_dir / DRAFT_FILE
 
     def _save_draft(self) -> bool:
         try:
-            if self.names:
-                write_names(self._draft_path(), self.names)
+            if self.students:
+                write_lines(self._draft_path(), numbered_lines(self.students))
             elif self._draft_path().exists():
                 self._draft_path().unlink()
             self.draft_ok = True
@@ -852,21 +1058,21 @@ class App(ctk.CTk):
 
     def _offer_draft(self) -> None:
         try:
-            names = read_names(self._draft_path()) if self._draft_path().is_file() else []
+            students = read_students(self._draft_path()) if self._draft_path().is_file() else []
         except OSError:
-            names = []
-        if not names:
+            students = []
+        if not students:
             return
-        sample = ", ".join(names[:3]) + (" …" if len(names) > 3 else "")
+        sample = ", ".join(s.name for s in students[:3]) + (" …" if len(students) > 3 else "")
         modal = Modal(self, "Listë e papërfunduar", default="restore", cancel="new",
                       buttons=[("new", "Fillo listë të re", "plain"), ("restore", "Vazhdo listën", "ink")])
-        modal.add_text(f"Herën e kaluar mbeti një klasë e paruajtur me {len(names)} nxënës:")
+        modal.add_text(f"Herën e kaluar mbeti një klasë e paruajtur me {len(students)} nxënës:")
         modal.add_text(sample, color=TEXT, pady=(6, 0))
         modal.add_text("Dëshironi ta vazhdoni?", pady=(12, 0))
         if self.ask(modal) == "restore":
-            self.names = names
+            self.students = students
             self._refresh_list()
-            self.set_status(f"Lista u rikthye: {len(names)} nxënës.", "ok")
+            self.set_status(f"Lista u rikthye: {len(students)} nxënës.", "ok")
 
     # ---------------------------------------------------------------- keyboard, focus, status
     def ask(self, modal: Modal) -> str:
@@ -890,7 +1096,7 @@ class App(ctk.CTk):
             self.modal.press_default()
         elif self.screen == "school":
             self.submit_school()
-        elif event.widget is self.listbox:
+        elif event.widget is self.table:
             self.edit_selected()
         else:
             self.add_student()
@@ -926,15 +1132,15 @@ class App(ctk.CTk):
         if self.modal is not None:
             self.modal.press_cancel()
             return
-        if self.names:
+        if self.students:
             modal = Modal(self, "Të mbyllet programi?", default="stay", cancel="stay",
                           buttons=[("stay", "Mbetu", "ink"), ("close", "Mbyll programin", "plain")])
             if self._save_draft():
-                modal.add_text(f"Klasa aktuale ka {len(self.names)} nxënës dhe ende nuk është ruajtur si klasë. "
+                modal.add_text(f"Klasa aktuale ka {len(self.students)} nxënës dhe ende nuk është ruajtur si klasë. "
                                "Lista ruhet automatikisht dhe do t'ju ofrohet sërish kur ta hapni këtë shkollë.")
             else:
-                modal.add_text(f"Kujdes: lista aktuale ({len(self.names)} nxënës) nuk mund të ruhej automatikisht. "
-                               "Nëse e mbyllni programin tani, këta emra humbasin.", color=RED)
+                modal.add_text(f"Kujdes: lista aktuale ({len(self.students)} nxënës) nuk mund të ruhej "
+                               "automatikisht. Nëse e mbyllni programin tani, këta emra humbasin.", color=RED)
             if self.ask(modal) != "close":
                 return
         self.destroy()
