@@ -23,7 +23,7 @@ echo Installing customtkinter and PyInstaller...
 
 echo.
 echo Building FotoNxenesit.exe - this takes about a minute...
-"%PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --name FotoNxenesit --collect-data customtkinter foto_nxenesit.py || goto :failed
+"%PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --name FotoNxenesit --collect-data customtkinter --add-data "tests;tests" foto_nxenesit.py || goto :failed
 
 echo.
 echo Done: "%~dp0dist\FotoNxenesit.exe"

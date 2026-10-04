@@ -2,3 +2,5 @@
 customtkinter>=5.2,<7
 # Builds the .exe
 pyinstaller>=6.0,<7
+# Runs the tests, from the terminal and inside the .exe on the first start of each version
+pytest>=8,<10

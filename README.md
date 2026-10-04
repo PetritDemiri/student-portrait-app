@@ -65,12 +65,14 @@ You need Windows and Python 3.10 or newer with Tcl/Tk, which the python.org inst
 
 ```
 py -m pip install -r requirements.txt
-py -m PyInstaller --noconfirm --clean --onefile --windowed --name FotoNxenesit --collect-data customtkinter foto_nxenesit.py
+py -m PyInstaller --noconfirm --clean --onefile --windowed --name FotoNxenesit --collect-data customtkinter --add-data "tests;tests" foto_nxenesit.py
 ```
 
 The program ends up in `dist\FotoNxenesit.exe`. To run it from source instead: `py foto_nxenesit.py`.
 
-Tests for the sorting and the class files: install pytest once with `py -m pip install -r requirements-dev.txt`, then type `pytest` in the project folder.
+Tests: after `py -m pip install -r requirements.txt`, type `pytest` in the project folder.
+
+The first time each new version of the `.exe` starts, it runs the same tests in a window before opening, so a problem shows up before a photo session instead of during one. It takes a few seconds and happens once per version. From source, `py foto_nxenesit.py --kontrollo` shows that window.
 
 GitHub Actions runs the tests and builds the `.exe` on every push to `main`. Pushing a tag that starts with `v` (for example `v1.0.0`) also publishes the `.exe` as a release.
 

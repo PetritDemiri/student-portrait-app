@@ -198,3 +198,28 @@ def test_other_days_show_the_date_too():
 
 def test_no_time():
     assert app.list_time(None) == ""
+
+
+# ------------------------------------------------------------------ self-check on the first start of a version
+def test_the_exe_checks_once_per_version(tmp_path):
+    assert app.check_needed(folder=tmp_path, frozen=True)
+    app.remember_checked_version(tmp_path)
+    assert not app.check_needed(folder=tmp_path, frozen=True)
+    (tmp_path / app.CHECK_RECORD).write_text("1.0.0", encoding="utf-8")  # an older version passed before
+    assert app.check_needed(folder=tmp_path, frozen=True)
+
+
+def test_from_source_only_when_asked(tmp_path):
+    assert not app.check_needed(folder=tmp_path, frozen=False)
+    assert app.check_needed(force=True, folder=tmp_path, frozen=False)
+
+
+def test_self_check_counts_tests_and_names_failures(tmp_path):
+    (tmp_path / "test_sample.py").write_text(
+        "def test_passes():\n    assert 1 + 1 == 2\n\n\ndef test_fails():\n    assert 1 + 1 == 3\n", encoding="utf-8")
+    progress = []
+    result = app.run_self_check(tmp_path, lambda done, total: progress.append((done, total)))
+    assert result.total == 2
+    assert [nodeid.split("::")[-1] for nodeid in result.failed] == ["test_fails"]
+    assert not result.ok
+    assert progress[0] == (0, 2) and progress[-1] == (2, 2)

@@ -13,19 +13,26 @@ How it works
      for the next class.
   4. "Përfundo shkollën" goes back to the start screen for the next school.
 
+The first time each new version of the .exe starts, it runs its own tests (the tests
+folder is packed inside) in a window before opening. From source, run it with
+"--kontrollo" to see that window.
+
 Build a single .exe on Windows (in the folder that contains this file):
-  py -m pip install --upgrade customtkinter pyinstaller
-  py -m PyInstaller --noconfirm --clean --onefile --windowed --name FotoNxenesit --collect-data customtkinter foto_nxenesit.py
+  py -m pip install --upgrade -r requirements.txt
+  py -m PyInstaller --noconfirm --clean --onefile --windowed --name FotoNxenesit --collect-data customtkinter --add-data "tests;tests" foto_nxenesit.py
 The program is then  dist\FotoNxenesit.exe
 """
 
 from __future__ import annotations
 
 import contextlib
+import io
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import unicodedata
@@ -40,7 +47,7 @@ import customtkinter as ctk
 
 # ------------------------------------------------------------------ settings
 APP_NAME = "Foto Nxënësit"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 TXT_ENCODING = "utf-8-sig"  # UTF-8 with BOM: ë and ç show correctly in Notepad, Word and Excel
 AUTO_CAPITALIZE = True      # "arta krasniqi" is saved as "Arta Krasniqi"
 DRAFT_FILE = "_klasa e papërfunduar.txt"  # autosave of the class in progress, inside the school folder
@@ -342,6 +349,102 @@ def open_folder(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+# ------------------------------------------------------------------ self-check on the first start of a version
+CHECK_RECORD = "kontrolli.txt"          # the version that last passed the self-check
+CHECK_REPORT = "kontrolli-raporti.txt"  # written when a check fails
+
+
+def app_data_dir() -> Path:
+    """%LOCALAPPDATA%\\FotoNxenesit: the program's own small files, kept out of Documents."""
+    base = os.environ.get("LOCALAPPDATA")
+    return (Path(base) if base else Path.home() / ".local" / "share") / "FotoNxenesit"
+
+
+def is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def tests_dir() -> Path:
+    """The tests folder: packed inside the .exe, or next to this file when run from source."""
+    return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "tests"
+
+
+def checked_version(folder: Path | None = None) -> str:
+    try:
+        return ((folder or app_data_dir()) / CHECK_RECORD).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def remember_checked_version(folder: Path | None = None) -> None:
+    folder = folder or app_data_dir()
+    with contextlib.suppress(OSError):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / CHECK_RECORD).write_text(APP_VERSION, encoding="utf-8")
+
+
+def check_needed(force: bool = False, folder: Path | None = None, frozen: bool | None = None) -> bool:
+    """True on the first start of each new version of the .exe (or when asked with --kontrollo)."""
+    if force:
+        return True
+    if not (is_frozen() if frozen is None else frozen):
+        return False  # from source, the tests are run with pytest instead
+    return checked_version(folder) != APP_VERSION
+
+
+@dataclass
+class CheckResult:
+    total: int
+    failed: list[str]
+    report: str
+    exit_code: int
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0 and self.total > 0 and not self.failed
+
+
+def run_self_check(folder: Path, on_progress=None) -> CheckResult:
+    """Run the tests in `folder` with pytest. on_progress(done, total) is called as they finish."""
+    import pytest
+
+    main_module = sys.modules.get("__main__")
+    if "foto_nxenesit" not in sys.modules and getattr(main_module, "APP_NAME", None) == APP_NAME:
+        sys.modules["foto_nxenesit"] = main_module  # the tests import the running program by name
+
+    class Progress:
+        def __init__(self):
+            self.total = self.done = 0
+            self.failed: list[str] = []
+
+        def pytest_collection_finish(self, session):
+            self.total = len(session.items)
+            if on_progress:
+                on_progress(0, self.total)
+
+        def pytest_runtest_logreport(self, report):
+            if report.failed and report.nodeid not in self.failed:
+                self.failed.append(report.nodeid)
+            if report.when == "teardown":
+                self.done += 1
+                if on_progress:
+                    on_progress(self.done, self.total)
+
+    progress, output = Progress(), io.StringIO()
+    autoload = os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD")
+    os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    try:
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            code = pytest.main([str(folder), "-q", "-p", "no:cacheprovider", "-p", "no:faulthandler",
+                                "--capture=sys"], plugins=[progress])
+    finally:
+        if autoload is None:
+            os.environ.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
+        else:
+            os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = autoload
+    return CheckResult(progress.total, progress.failed, output.getvalue(), int(code))
+
+
 # ------------------------------------------------------------------ dialogs
 class Modal:
     """A dialog drawn inside the main window. It cannot get lost behind the window, and
@@ -470,7 +573,7 @@ class Modal:
 
 # ------------------------------------------------------------------ main window
 class App(ctk.CTk):
-    def __init__(self):
+    def __init__(self, force_check: bool = False):
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
         super().__init__(fg_color=PAPER)
@@ -493,7 +596,13 @@ class App(ctk.CTk):
         self._style_table()
         self._build_school_screen()
         self._build_class_screen()
-        self._show_screen("school")
+        self._build_check_screen()
+        self._check_default = None
+        if check_needed(force_check):
+            self._show_screen("check")
+            self.after(300, self._start_check)
+        else:
+            self._show_screen("school")
 
         for sequence in ("<Return>", "<KP_Enter>"):
             self.bind(sequence, self._on_enter)
@@ -563,6 +672,115 @@ class App(ctk.CTk):
                         padding=(round(4 * s), round(8 * s)))
         style.map("Klasa.Treeview.Heading", background=[("active", SHEET), ("pressed", SHEET)],
                   relief=[("active", "flat"), ("pressed", "flat")])
+
+    # ---------------------------------------------------------------- self-check screen
+    def _build_check_screen(self) -> None:
+        screen = self.check_screen = ctk.CTkFrame(self, fg_color=PAPER, corner_radius=0)
+        col = ctk.CTkFrame(screen, fg_color="transparent")
+        col.place(relx=0.5, rely=0.45, anchor="center")
+        width = 540
+        ctk.CTkFrame(col, fg_color="transparent", width=width, height=1).pack()
+        self.label(col, "Kontrolli i programit", size=30, strong=True, wrap=width).pack(fill="x")
+        self.label(col, "Herën e parë që hapet një version i ri, programi kontrollon veten para se të fillojë. "
+                        "Kjo zgjat vetëm pak sekonda.", size=15, color=GRAPHITE, wrap=width).pack(fill="x", pady=(8, 24))
+        self.check_bar = ctk.CTkProgressBar(col, height=10, corner_radius=5, progress_color=INK, fg_color=RULE)
+        self.check_bar.set(0)
+        self.check_bar.pack(fill="x")
+        self.check_count = self.label(col, "Po fillon kontrolli …", size=14, color=GRAPHITE)
+        self.check_count.pack(fill="x", pady=(8, 0))
+        self.check_result = self.label(col, "", size=18, strong=True, wrap=width)
+        self.check_result.pack(fill="x", pady=(16, 0))
+        self.check_details = ctk.CTkTextbox(col, height=150, font=self.font(13), fg_color=SHEET, text_color=TEXT,
+                                            border_width=1, border_color=RULE, corner_radius=8, wrap="word")
+        self.check_buttons = ctk.CTkFrame(col, fg_color="transparent")
+        self.check_buttons.pack(fill="x", pady=(20, 0))
+
+    def _start_check(self) -> None:
+        self._check_queue: queue.Queue = queue.Queue()
+        folder = tests_dir()
+
+        def work():
+            try:
+                result = run_self_check(folder, lambda done, total: self._check_queue.put(("progress", done, total)))
+            except Exception as exc:  # pytest or the tests missing from the build
+                result = exc
+            self._check_queue.put(("done", result))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.after(60, self._poll_check)
+
+    def _poll_check(self) -> None:
+        try:
+            while True:
+                item = self._check_queue.get_nowait()
+                if item[0] == "done":
+                    self._finish_check(item[1])
+                    return
+                _, done, total = item
+                if total:
+                    self.check_bar.set(done / total)
+                    self.check_count.configure(text=f"Kontrolli {done} nga {total}")
+        except queue.Empty:
+            pass
+        self.after(60, self._poll_check)
+
+    def _finish_check(self, result) -> None:
+        if isinstance(result, CheckResult) and result.ok:
+            if is_frozen():
+                remember_checked_version()
+            self.check_bar.set(1)
+            self.check_count.configure(text=f"Kontrolli {result.total} nga {result.total}")
+            self.check_result.configure(text=f"{result.total} kontrolle, të gjitha në rregull.", text_color=GREEN)
+            self.button(self.check_buttons, "Vazhdo", "ink", self._leave_check, height=54, size=17,
+                        width=540).pack(fill="x")
+        else:
+            report = self._save_check_report(result)
+            if isinstance(result, CheckResult) and result.total and result.failed:
+                n = len(result.failed)
+                headline = (f"1 nga {result.total} kontrolle dështoi." if n == 1 else
+                            f"{n} nga {result.total} kontrolle dështuan.")
+                details = "\n".join(nodeid.split("::", 1)[-1] for nodeid in result.failed)
+            else:
+                headline = "Kontrolli nuk mund të kryhej."
+                details = (f"{type(result).__name__}: {result}" if isinstance(result, Exception)
+                           else result.report.strip()[-1500:])
+            if report is not None:
+                details += f"\n\nRaporti i plotë: {report}"
+            self.check_result.configure(text=headline, text_color=RED)
+            self.check_details.insert("1.0", details)
+            self.check_details.configure(state="disabled")
+            self.check_details.pack(fill="x", pady=(10, 0), before=self.check_buttons)
+            row = self.check_buttons
+            for column in range(3):
+                row.grid_columnconfigure(column, weight=1, uniform="check")
+            if report is not None:
+                self.button(row, "Hap raportin", "plain", lambda: self._open(report), height=50, size=15).grid(
+                    row=0, column=0, sticky="ew", padx=(0, 6))
+            self.button(row, "Mbyll programin", "plain-red", self.destroy, height=50, size=15).grid(
+                row=0, column=1, sticky="ew", padx=6)
+            self.button(row, "Vazhdo gjithsesi", "ink", self._leave_check, height=50, size=15).grid(
+                row=0, column=2, sticky="ew", padx=(6, 0))
+        self._check_default = self._leave_check
+        self.focus_input()
+
+    @staticmethod
+    def _save_check_report(result) -> Path | None:
+        if isinstance(result, Exception):
+            body = "".join(traceback.format_exception(type(result), result, result.__traceback__))
+        else:
+            body = result.report
+        path = app_data_dir() / CHECK_REPORT
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{APP_NAME} {APP_VERSION}, {datetime.now():%d.%m.%Y %H:%M:%S}\n\n{body}",
+                            encoding="utf-8")
+            return path
+        except OSError:
+            return None
+
+    def _leave_check(self) -> None:
+        self._check_default = None
+        self._show_screen("school")
 
     # ---------------------------------------------------------------- school screen
     def _build_school_screen(self) -> None:
@@ -1017,6 +1235,8 @@ class App(ctk.CTk):
 
     def _type_letter(self, letter: str) -> str:
         """Alt+E / Alt+C: type ë / ç into the field that has the cursor."""
+        if self.screen == "check":
+            return "break"
         widget = self.focus_get()
         if isinstance(widget, tk.Entry):
             target = widget
@@ -1082,18 +1302,25 @@ class App(ctk.CTk):
 
     def focus_input(self) -> None:
         if self.modal is None:
-            (self.student_entry if self.screen == "class" else self.school_entry).focus_set()
+            if self.screen == "check":
+                self.check_screen.focus_set()
+            else:
+                (self.student_entry if self.screen == "class" else self.school_entry).focus_set()
 
     def _show_screen(self, name: str) -> None:
         self.screen = name
-        self.school_screen.pack_forget()
-        self.class_screen.pack_forget()
-        (self.class_screen if name == "class" else self.school_screen).pack(fill="both", expand=True)
+        screens = {"check": self.check_screen, "school": self.school_screen, "class": self.class_screen}
+        for frame in screens.values():
+            frame.pack_forget()
+        screens[name].pack(fill="both", expand=True)
         self.focus_input()
 
     def _on_enter(self, event) -> str:
         if self.modal is not None:
             self.modal.press_default()
+        elif self.screen == "check":
+            if self._check_default is not None:
+                self._check_default()
         elif self.screen == "school":
             self.submit_school()
         elif event.widget is self.table:
@@ -1155,7 +1382,7 @@ class App(ctk.CTk):
 
 def main() -> None:
     try:
-        app = App()
+        app = App(force_check="--kontrollo" in sys.argv[1:])
     except Exception:
         details = traceback.format_exc()
         if sys.stderr:

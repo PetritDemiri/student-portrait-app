@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 – 2026-10-04
+
+### Added
+- The first time each new version starts, the program runs its tests in a window before opening, with a progress bar and the result. If a check fails, it names it, saves a report, and lets you continue or close.
+- `--kontrollo` shows the same check when running from source.
+
+### Changed
+- pytest is now part of `requirements.txt` (it is packed into the `.exe`), so `requirements-dev.txt` is gone.
+
 ## 1.2.0 – 2026-10-04
 
 ### Changed
