@@ -209,6 +209,11 @@ def test_the_exe_checks_once_per_version(tmp_path):
     assert app.check_needed(folder=tmp_path, frozen=True)
 
 
+def test_check_files_live_in_documents(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "documents_dir", lambda: tmp_path)
+    assert app.app_data_dir() == tmp_path / "FotoNxenesit"
+
+
 def test_from_source_only_when_asked(tmp_path):
     assert not app.check_needed(folder=tmp_path, frozen=False)
     assert app.check_needed(force=True, folder=tmp_path, frozen=False)

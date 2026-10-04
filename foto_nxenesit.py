@@ -47,7 +47,7 @@ import customtkinter as ctk
 
 # ------------------------------------------------------------------ settings
 APP_NAME = "Foto Nxënësit"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 TXT_ENCODING = "utf-8-sig"  # UTF-8 with BOM: ë and ç show correctly in Notepad, Word and Excel
 AUTO_CAPITALIZE = True      # "arta krasniqi" is saved as "Arta Krasniqi"
 DRAFT_FILE = "_klasa e papërfunduar.txt"  # autosave of the class in progress, inside the school folder
@@ -355,9 +355,8 @@ CHECK_REPORT = "kontrolli-raporti.txt"  # written when a check fails
 
 
 def app_data_dir() -> Path:
-    """%LOCALAPPDATA%\\FotoNxenesit: the program's own small files, kept out of Documents."""
-    base = os.environ.get("LOCALAPPDATA")
-    return (Path(base) if base else Path.home() / ".local" / "share") / "FotoNxenesit"
+    """Documents\\FotoNxenesit: the program's own small files (the self-check record and report)."""
+    return documents_dir() / "FotoNxenesit"
 
 
 def is_frozen() -> bool:

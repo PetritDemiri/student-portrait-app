@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1 – 2026-10-04
+
+### Changed
+- The self-check keeps its two small files (`kontrolli.txt` and, after a failed check, `kontrolli-raporti.txt`) in `Documents\FotoNxenesit` instead of the hidden `%LOCALAPPDATA%\FotoNxenesit`.
+
 ## 1.3.0 – 2026-10-04
 
 ### Added
