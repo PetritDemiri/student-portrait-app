@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0 – 2026-10-06
+
+### Added
+- *Klasat e ruajtura*, on the start screen and during a session, to read and correct the class lists that are already saved. From the start screen it lists every school with saved classes; during a session it opens that school's classes, and *Kthehu* returns to the class being photographed.
+- In a saved list: add a name (without a photo time), rename, delete, sort by the Albanian alphabet, and move a student to another class, existing or new. Nothing is written until *Ruaj ndryshimet* (or Ctrl+S), and leaving with unsaved changes asks first.
+- *Hap në Notepad* opens the list as it is; when it is saved there, the program reads it again. If the list also has unsaved changes in the program, saving asks which one to keep.
+- *Kthe versionin e mëparshëm*: before the program changes a saved list, it keeps the version before it in `Documents\FotoNxenesit\kopje`, and one click brings it back.
+
+### Changed
+- Adding to or replacing a class list when a class is finished also keeps the old list as that copy.
+- The second line of a screen's header wraps instead of being cut off.
+
 ## 1.3.2 – 2026-10-04
 
 ### Changed

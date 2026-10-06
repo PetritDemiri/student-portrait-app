@@ -10,6 +10,14 @@ import pytest
 import foto_nxenesit as app
 
 
+@pytest.fixture(autouse=True)
+def documents(tmp_path, monkeypatch):
+    """Every test gets its own Documents folder, so the tests never touch the real one
+    (they also run inside the .exe, on the first start of each version)."""
+    monkeypatch.setattr(app, "documents_dir", lambda: tmp_path)
+    return tmp_path
+
+
 def assert_order(names):
     """The names must come out in exactly this order, whatever order they go in."""
     names = list(names)
@@ -228,3 +236,106 @@ def test_self_check_counts_tests_and_names_failures(tmp_path):
     assert [nodeid.split("::")[-1] for nodeid in result.failed] == ["test_fails"]
     assert not result.ok
     assert progress[0] == (0, 2) and progress[-1] == (2, 2)
+
+
+# ------------------------------------------------------------------ saved classes: reading and editing
+def test_classes_in_school_order():
+    classes = ["X-10", "IX-1", "X-2", "VI-3", "XII-1", "X-1", "XI-2"]
+    assert sorted(classes, key=app.class_sort_key) == ["VI-3", "IX-1", "X-1", "X-2", "X-10", "XI-2", "XII-1"]
+
+
+def test_classes_with_numbers_and_words():
+    classes = ["10-2", "9-1", "10-10", "Klasa B", "Klasa A"]
+    assert sorted(classes, key=app.class_sort_key) == ["Klasa A", "Klasa B", "9-1", "10-2", "10-10"]
+
+
+def test_list_classes_with_counts(school):
+    for name, count in (("X-10", 2), ("X-2", 1), ("IX-1", 3)):
+        save(school, [app.Student(f"Nxënës {i}") for i in range(count)], folder=name)
+    (school / "fotot").mkdir()  # a folder without a class list
+    rows = app.list_classes(school)
+    assert [(name, count) for name, _, count, _ in rows] == [("IX-1", 3), ("X-2", 1), ("X-10", 2)]
+    assert all(saved is not None for _, _, _, saved in rows)
+
+
+def test_list_schools_only_with_saved_classes(documents):
+    save(documents / "Shkolla B", [app.Student("Arta"), app.Student("Besa")], folder="X-1")
+    save(documents / "Shkolla B", [app.Student("Dea")], folder="X-2")
+    save(documents / "Shkolla A", [app.Student("Ilir"), app.Student("Jeta")], folder="XI-1")
+    (documents / "Fotot e mia").mkdir()
+    (documents / "FotoNxenesit" / "kopje").mkdir(parents=True)
+    rows = app.list_schools(documents)
+    assert [(folder.name, classes, students) for folder, classes, students in rows] == [
+        ("Shkolla A", 1, 2), ("Shkolla B", 2, 3)]
+
+
+def test_insert_keeps_an_alphabetical_list_in_order():
+    students = [app.Student("Arta"), app.Student("Dea"), app.Student("Zana")]
+    assert [s.name for s in app.insert_student(students, app.Student("Çlirim"))] == ["Arta", "Çlirim", "Dea", "Zana"]
+
+
+def test_insert_into_a_list_of_one_name_goes_in_alphabetical_place():
+    assert [s.name for s in app.insert_student([app.Student("Zana")], app.Student("Besa"))] == ["Besa", "Zana"]
+
+
+def test_insert_adds_to_the_end_of_photographing_order():
+    students = [app.Student("Zana"), app.Student("Arta")]
+    assert [s.name for s in app.insert_student(students, app.Student("Besa"))] == ["Zana", "Arta", "Besa"]
+
+
+def test_backups_live_in_documents(school, documents):
+    assert app.backup_path(school, "X-1") == documents / "FotoNxenesit" / "kopje" / "Shkolla" / "X-1.txt"
+
+
+def test_saving_an_edited_list_keeps_the_version_before_it(school):
+    path, _, _ = save(school, [app.Student("Zana Hoxha", T1), app.Student("Arta Gashi", T2)])
+    before = path.read_bytes()
+    assert app.save_edited_class(school, "X-1", [app.Student("Arta Gashi", T2), app.Student("Besa")])
+    assert app.backup_path(school, "X-1").read_bytes() == before
+    assert app.read_text(path).splitlines() == ["1. Arta Gashi – 01.10.2026 09:42:17", "2. Besa", "",
+                                                "Gjithsej: 2 nxënës në klasën X-1"]
+
+
+def test_restoring_swaps_with_the_copy_so_it_can_be_undone(school):
+    path, _, _ = save(school, [app.Student("Zana Hoxha", T1)])
+    app.save_edited_class(school, "X-1", [app.Student("Dea Rama", T2)])
+    assert app.restore_backup(school, "X-1")
+    assert app.read_students(path) == [app.Student("Zana Hoxha", T1)]
+    assert app.restore_backup(school, "X-1")
+    assert app.read_students(path) == [app.Student("Dea Rama", T2)]
+
+
+def test_no_copy_nothing_to_restore(school):
+    save(school, [app.Student("Zana Hoxha", T1)])
+    assert not app.restore_backup(school, "X-1")
+
+
+def test_saving_a_class_over_an_existing_list_keeps_a_copy(school):
+    path, _, _ = save(school, [app.Student("Zana Hoxha", T1)])
+    before = path.read_bytes()
+    save(school, [app.Student("Dea Rama", T2)])  # "Zëvendëso listën"
+    assert app.backup_path(school, "X-1").read_bytes() == before
+
+
+def test_move_a_student_to_another_class(school):
+    save(school, [app.Student("Arta Gashi", T1), app.Student("Zana Hoxha", T2)], folder="X-1")
+    save(school, [app.Student("Besa", T1), app.Student("Dea", T2)], folder="X-2")
+    target = app.move_student(school, "X-1", [app.Student("Zana Hoxha", T2)], "X-2", app.Student("Arta Gashi", T1))
+    assert [s.name for s in target] == ["Arta Gashi", "Besa", "Dea"]
+    assert app.read_students(school / "X-2" / "X-2.txt")[0] == app.Student("Arta Gashi", T1), "the time moves too"
+    assert app.read_students(school / "X-1" / "X-1.txt") == [app.Student("Zana Hoxha", T2)]
+    assert app.backup_path(school, "X-1").is_file() and app.backup_path(school, "X-2").is_file()
+
+
+def test_move_a_student_to_a_new_class(school):
+    save(school, [app.Student("Arta"), app.Student("Besa")], folder="X-1")
+    target = app.move_student(school, "X-1", [app.Student("Besa")], "X-9", app.Student("Arta"))
+    assert target == [app.Student("Arta")]
+    assert app.read_text(school / "X-9" / "X-9.txt").splitlines() == ["1. Arta", "", "Gjithsej: 1 nxënës në klasën X-9"]
+
+
+def test_file_matches_only_the_same_list(school):
+    students = [app.Student("Arta Gashi", T2), app.Student("Besa")]
+    path, _, _ = save(school, students, alphabetical=False)
+    assert app.file_matches(path, app.class_file_lines(students, "X-1"))
+    assert not app.file_matches(path, app.class_file_lines(students[:1], "X-1"))

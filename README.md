@@ -1,6 +1,6 @@
 # Foto Nxënësit
 
-A small Windows app for school badge photo sessions. Type each student's name, confirm that the portrait was taken, and when the class is done you get a numbered class list with the date and time of every photo, sorted by the Albanian alphabet if you want.
+A small Windows app for school badge photo sessions. Type each student's name, confirm that the portrait was taken, and when the class is done you get a numbered class list with the date and time of every photo, sorted by the Albanian alphabet if you want. Saved lists can be read and corrected later from the program.
 
 The interface is in Albanian. Student names never leave your computer.
 
@@ -12,6 +12,7 @@ The interface is in Albanian. Student names never leave your computer.
 2. **Students.** Type a student's full name and press Enter. A badge preview asks whether the photo was taken: Enter adds the name to the class list with the time, Esc keeps it in the field for later.
 3. **Finish the class.** Click *Përfundo klasën*, type the class name (X-1, X-2 …) and choose the order: Albanian alphabet or photographing order. The list is saved, and cleared for the next class.
 4. **Finish the school.** *Përfundo shkollën* shows how many classes and students were saved, then goes back to the start for the next school.
+5. **Saved classes.** *Klasat e ruajtura* opens the class lists that are already saved, to read and correct them. On the start screen it lists every school with saved classes; during a session it opens that school's classes, and *Kthehu* returns to the class being photographed. In a list you can add a name (it gets no photo time), rename, delete, sort by the Albanian alphabet, or move a student to another class, existing or new. Nothing is written to the file until *Ruaj ndryshimet* (or Ctrl+S), and leaving with unsaved changes asks first. *Hap në Notepad* opens the file as it is; when it is saved there, the program reads it again.
 
 ```
 Documents\
@@ -44,8 +45,9 @@ Digraphs count as single letters, so *Syla* comes before *Shala* and *Tushi* bef
 
 | Key | What it does |
 | --- | --- |
-| Enter | Add the student, or confirm the photo |
-| Esc | "Not yet" in the photo dialog, or clear the name field |
+| Enter | Add the student or confirm the photo; in the saved classes, open the selected school or class |
+| Esc | "Not yet" in the photo dialog or clear the name field; in the saved classes, go back |
+| Ctrl+S | Save the changes to a saved class list |
 | Alt+E / Alt+C | Type ë / ç (the ë and ç buttons under the name field do the same) |
 | Double-click or F2 | Edit the selected name |
 | Delete | Remove the selected name |
@@ -55,6 +57,8 @@ Digraphs count as single letters, so *Syla* comes before *Shala* and *Tushi* bef
 - The class in progress is saved after every change (`_klasa e papërfunduar.txt` in the school folder) and offered back the next time that school is opened, so a crash or an accidental close loses nothing.
 - A name that's already on the list shows a warning. It can still be added, since two students can share a name.
 - Saving a class that already has a list asks whether to add the new names to it (repeats are skipped) or replace it. Lists saved by version 1.0.0 are read too; their names simply have no time.
+- Every change the program makes to a saved list (editing it, moving a student, or adding to or replacing it when a class is finished) first keeps the version before it in `Documents\FotoNxenesit\kopje`. *Kthe versionin e mëparshëm* brings that version back, and pressing it again undoes the restore.
+- If a list that is open for editing is saved in another program, the program reads it again. If it also has unsaved changes of its own, saving asks which list to keep.
 - Characters Windows doesn't allow in folder names are converted: `"` becomes “ ”, and `/` `\` `:` become `-`, so *X/1* is saved as *X-1*.
 
 The `.exe` isn't code-signed, so the first launch may show "Windows protected your PC". Click **More info**, then **Run anyway**.
@@ -87,6 +91,8 @@ Two settings sit at the top of `foto_nxenesit.py`: `AUTO_CAPITALIZE` turns "arta
 3. Për çdo nxënës shkruani emrin dhe mbiemrin, shtypni Enter dhe, pasi të bëhet fotografia, shtypni Enter përsëri. Programi shënon datën dhe orën e fotografisë.
 4. Kur mbaron klasa, shtypni **Përfundo klasën**, shkruani emrin e klasës (p.sh. X-1) dhe zgjidhni renditjen: sipas alfabetit shqip ose sipas radhës së fotografimit. Lista ruhet te `Dokumentet\<shkolla>\<klasa>\<klasa>.txt` me numra, me datën dhe orën e çdo fotografie dhe me numrin e nxënësve në fund.
 5. Kur mbaron shkolla, shtypni **Përfundo shkollën** për të kaluar te shkolla tjetër.
+
+6. Për të lexuar ose ndryshuar një listë të ruajtur, shtypni **Klasat e ruajtura**, në fillim ose gjatë fotografimit. Aty mund të shtoni, ndryshoni ose fshini emra, t'i renditni sipas alfabetit ose të zhvendosni një nxënës në klasë tjetër. Asgjë nuk ruhet pa shtypur **Ruaj ndryshimet**, dhe versioni i mëparshëm i listës mbahet si kopje.
 
 Nëse tastiera nuk ka ë dhe ç, përdorni butonat nën fushën e emrit ose Alt+E dhe Alt+C.
 

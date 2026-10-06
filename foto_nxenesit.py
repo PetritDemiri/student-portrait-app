@@ -12,6 +12,9 @@ How it works
      each portrait was confirmed, followed by the class total, and clears the list
      for the next class.
   4. "Përfundo shkollën" goes back to the start screen for the next school.
+  5. "Klasat e ruajtura" (on the start screen and during a session) opens the saved class lists
+     to read and edit them: add, rename, delete, sort, or move a student to another class.
+     Each change keeps the version before it in Documents\FotoNxenesit\kopje.
 
 The first time each new version of the .exe starts, it runs its own tests (the tests
 folder is packed inside) in a window before opening. From source, run it with
@@ -30,6 +33,7 @@ import io
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -47,7 +51,7 @@ import customtkinter as ctk
 
 # ------------------------------------------------------------------ settings
 APP_NAME = "Foto Nxënësit"
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.4.0"
 TXT_ENCODING = "utf-8-sig"  # UTF-8 with BOM: ë and ç show correctly in Notepad, Word and Excel
 AUTO_CAPITALIZE = True      # "arta krasniqi" is saved as "Arta Krasniqi"
 DRAFT_FILE = "_klasa e papërfunduar.txt"  # autosave of the class in progress, inside the school folder
@@ -89,6 +93,9 @@ BUTTON_STYLES = {
                       border_width=2, border_color=RED),
 }
 STATUS_COLORS = {"ok": GREEN, "warn": AMBER, "error": RED, "info": GRAPHITE}
+# the columns of a class list: id, heading, anchor, width, minimum width, stretch
+STUDENT_COLUMNS = (("nr", "Nr.", "e", 54, 40, False), ("name", "   Emri dhe mbiemri", "w", 240, 120, True),
+                   ("time", "Koha  ", "e", 110, 90, False))
 
 
 # ------------------------------------------------------------------ Albanian alphabetical order
@@ -149,6 +156,11 @@ def clean_name(raw: str) -> str:
 def same_name(name: str) -> str:
     """Comparison form of a name: ignores upper/lower case and extra spaces."""
     return " ".join(unicodedata.normalize("NFC", name).casefold().split())
+
+
+def keep_together(text: str) -> str:
+    """Non-breaking spaces, so a wrapped line never splits this text."""
+    return text.replace(" ", "\u00a0")
 
 
 def count_names(n: int) -> str:
@@ -270,12 +282,16 @@ def count_names_in(path: Path) -> int:
 
 
 def write_lines(path: Path, lines: list[str]) -> None:
-    """Write the lines with Windows line endings. A temporary file is renamed over the old one,
-    so an existing list is never left half-written."""
+    """Write the lines with Windows line endings."""
+    replace_file(path, "\r\n".join(lines).encode(TXT_ENCODING))
+
+
+def replace_file(path: Path, data: bytes) -> None:
+    """Write through a temporary file that is renamed over the old one, so a list is never left
+    half-written."""
     tmp = path.with_name(path.name + ".tmp")
     try:
-        with open(tmp, "w", encoding=TXT_ENCODING, newline="\r\n") as f:
-            f.write("\n".join(lines))
+        tmp.write_bytes(data)
         for attempt in range(8):
             try:
                 os.replace(tmp, path)
@@ -308,6 +324,8 @@ def save_class(school_dir: Path, class_folder: str, students: list[Student],
                 final.append(student)
     if alphabetical:
         final = sorted(final, key=lambda s: albanian_sort_key(s.name))
+    if txt.is_file():
+        backup_class(school_dir, class_folder)  # the list being added to or replaced can be brought back
     write_lines(txt, class_file_lines(final, class_folder))
     return txt, final, skipped
 
@@ -349,6 +367,187 @@ def open_folder(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+# ------------------------------------------------------------------ saved classes: reading and editing
+APP_FOLDER = "FotoNxenesit"   # Documents\\FotoNxenesit: the program's own files
+BACKUP_FOLDER = "kopje"       # each class list as it was before the program last changed it
+_ROMAN = {"i": 1, "v": 5, "x": 10}
+
+
+def _roman_value(token: str) -> int | None:
+    word = token.lower()
+    if not word or not re.fullmatch(r"x{0,3}(ix|iv|v?i{0,3})", word):
+        return None
+    total = 0
+    for i, ch in enumerate(word):
+        value = _ROMAN[ch]
+        total += -value if i + 1 < len(word) and _ROMAN[word[i + 1]] > value else value
+    return total
+
+
+def class_sort_key(name: str):
+    """Classes in school order: VI-1, IX-3, X-1, X-2, X-10, XI-1 (Roman numerals and numbers by value)."""
+    key = []
+    for token in re.findall(r"\d+|[^\W\d_]+", unicodedata.normalize("NFC", name)):
+        roman = None if token.isdigit() else _roman_value(token)
+        if token.isdigit():
+            key.append((1, int(token)))
+        elif roman is not None:
+            key.append((1, roman))
+        else:
+            key.append((0, _word_key(token.lower())))
+    return key, name.casefold()
+
+
+def is_alphabetical(students: list[Student]) -> bool:
+    """True for a list of two or more names in Albanian alphabetical order."""
+    names = [s.name for s in students]
+    return len(names) >= 2 and names == sorted(names, key=albanian_sort_key)
+
+
+def keeps_alphabetical(students: list[Student]) -> bool:
+    """Whether a name added to this list goes into its alphabetical place. A list of one name counts
+    as alphabetical: classes are usually saved that way."""
+    return len(students) < 2 or is_alphabetical(students)
+
+
+def insert_student(students: list[Student], student: Student) -> list[Student]:
+    """Add a student in alphabetical place if the list is alphabetical, otherwise at the end."""
+    if keeps_alphabetical(students):
+        return sorted(students + [student], key=lambda s: albanian_sort_key(s.name))
+    return students + [student]
+
+
+def _subfolders(path: Path) -> list[Path]:
+    try:
+        entries = list(path.iterdir())
+    except OSError:
+        return []
+    folders = []
+    for entry in entries:
+        with contextlib.suppress(OSError):
+            if entry.is_dir():
+                folders.append(entry)
+    return folders
+
+
+def list_classes(school_dir: Path) -> list[tuple[str, Path, int, datetime | None]]:
+    """The saved classes of a school, in class order: (class, file, students, last saved)."""
+    rows = []
+    for folder in _subfolders(school_dir):
+        txt = folder / f"{folder.name}.txt"
+        if txt.is_file():
+            try:
+                saved = datetime.fromtimestamp(txt.stat().st_mtime)
+            except OSError:
+                saved = None
+            rows.append((folder.name, txt, count_names_in(txt), saved))
+    return sorted(rows, key=lambda row: class_sort_key(row[0]))
+
+
+def list_schools(documents: Path) -> list[tuple[Path, int, int]]:
+    """School folders in Documents that hold saved classes: (folder, classes, students)."""
+    rows = []
+    for folder in _subfolders(documents):
+        if folder.name == APP_FOLDER:
+            continue
+        classes, students = school_summary(folder)
+        if classes:
+            rows.append((folder, classes, students))
+    return sorted(rows, key=lambda row: albanian_sort_key(row[0].name))
+
+
+def class_file(school_dir: Path, class_name: str) -> Path:
+    return school_dir / class_name / f"{class_name}.txt"
+
+
+def backup_path(school_dir: Path, class_name: str) -> Path:
+    """Documents\\FotoNxenesit\\kopje\\<school>\\<class>.txt"""
+    return app_data_dir() / BACKUP_FOLDER / school_dir.name / f"{class_name}.txt"
+
+
+def backup_class(school_dir: Path, class_name: str) -> bool:
+    """Keep a copy of the class list as it is now. Returns False when no copy was made."""
+    source = class_file(school_dir, class_name)
+    if not source.is_file():
+        return False
+    target = backup_path(school_dir, class_name)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    except OSError:
+        return False
+    return True
+
+
+def file_signature(path: Path) -> tuple[int, int] | None:
+    """Changes whenever the file is saved, by this program or by another one (e.g. Notepad)."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info.st_mtime_ns, info.st_size
+
+
+def file_matches(path: Path, lines: list[str]) -> bool:
+    """True if the file already holds exactly these lines."""
+    try:
+        text = read_text(path)
+    except OSError:
+        return False
+    return text.replace("\r\n", "\n").strip("\n") == "\n".join(lines).strip("\n")
+
+
+def save_edited_class(school_dir: Path, class_name: str, students: list[Student]) -> bool:
+    """Write an edited class list (renumbered, with the new total), keeping a copy of the old one
+    first. Returns whether the copy was made."""
+    backed_up = backup_class(school_dir, class_name)
+    write_lines(class_file(school_dir, class_name), class_file_lines(students, class_name))
+    return backed_up
+
+
+def move_student(school_dir: Path, from_class: str, remaining: list[Student], to_class: str,
+                 student: Student) -> list[Student]:
+    """Put a student into another class (created if needed) and write the rest of the list back.
+    The other class is written first, so a failure can leave the student in both lists, never in
+    neither. Returns the new list of the other class."""
+    target_txt = class_file(school_dir, to_class)
+    target = insert_student(read_students(target_txt) if target_txt.is_file() else [], student)
+    target_txt.parent.mkdir(parents=True, exist_ok=True)
+    backup_class(school_dir, to_class)
+    backup_class(school_dir, from_class)
+    write_lines(target_txt, class_file_lines(target, to_class))
+    write_lines(class_file(school_dir, from_class), class_file_lines(remaining, from_class))
+    return target
+
+
+def restore_backup(school_dir: Path, class_name: str) -> bool:
+    """Swap the class list with its copy, so that restoring can itself be undone."""
+    txt, backup = class_file(school_dir, class_name), backup_path(school_dir, class_name)
+    if not backup.is_file():
+        return False
+    restored = backup.read_bytes()
+    if txt.is_file():
+        current, info = txt.read_bytes(), txt.stat()
+        replace_file(txt, restored)  # first, so a list that is open in Excel changes nothing
+        replace_file(backup, current)
+        with contextlib.suppress(OSError):
+            os.utime(backup, ns=(info.st_atime_ns, info.st_mtime_ns))  # the copy keeps the date it was saved
+    else:
+        txt.parent.mkdir(parents=True, exist_ok=True)
+        replace_file(txt, restored)
+    return True
+
+
+def open_in_notepad(path: Path) -> None:
+    if sys.platform.startswith("win"):
+        try:
+            subprocess.Popen(["notepad.exe", str(path)])
+        except OSError:
+            os.startfile(str(path))  # noqa: S606 - the default program for .txt files
+        return
+    open_folder(path)  # other systems are only used for testing: their default program
+
+
 # ------------------------------------------------------------------ self-check on the first start of a version
 CHECK_RECORD = "kontrolli.txt"          # the version that last passed the self-check
 CHECK_REPORT = "kontrolli-raporti.txt"  # written when a check fails
@@ -356,7 +555,7 @@ CHECK_REPORT = "kontrolli-raporti.txt"  # written when a check fails
 
 def app_data_dir() -> Path:
     """Documents\\FotoNxenesit: the program's own small files (the self-check record and report)."""
-    return documents_dir() / "FotoNxenesit"
+    return documents_dir() / APP_FOLDER
 
 
 def is_frozen() -> bool:
@@ -589,6 +788,17 @@ class App(ctk.CTk):
         self.students: list[Student] = []
         self.sort_choice = "alpha"
         self.draft_ok = True
+        # the saved-classes screens
+        self.browse_from = "school"     # where Kthehu leads from them: the start screen or the class screen
+        self.browse_level = "schools"   # "schools" or "classes"
+        self.browse_dir: Path | None = None
+        self.browse_rows: list = []
+        self.ed_class = ""                       # the class list open in the editor
+        self.ed_students: list[Student] = []     # as edited here
+        self.ed_loaded: list[Student] = []       # as it is in the file
+        self.ed_signature = None                 # the file as it was when read or saved here
+        self.ed_external = False                 # saved by another program while there were unsaved edits
+        self._watch_job = None
         self.scale = ctk.ScalingTracker.get_widget_scaling(self)
         # plain Tk widgets are not scaled by customtkinter, so their fonts are sized in pixels here
         self.list_font = tkfont.Font(self, family=UI_FONT, size=-round(18 * self.scale))
@@ -600,6 +810,8 @@ class App(ctk.CTk):
         self._build_school_screen()
         self._build_class_screen()
         self._build_check_screen()
+        self._build_browse_screen()
+        self._build_editor_screen()
         self._check_default = None
         if check_needed(force_check):
             self._show_screen("check")
@@ -612,6 +824,8 @@ class App(ctk.CTk):
         self.bind("<Escape>", self._on_escape)
         self.bind("<Tab>", lambda e: "break" if self.modal else None)
         self.bind("<Key>", self._on_key)
+        for sequence in ("<Control-s>", "<Control-S>"):
+            self.bind(sequence, self._on_save_key)
         for key, letter in (("e", "ë"), ("E", "Ë"), ("c", "ç"), ("C", "Ç")):
             self.bind(f"<Alt-{key}>", lambda e, letter=letter: self._type_letter(letter))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -651,6 +865,78 @@ class App(ctk.CTk):
                           **BUTTON_STYLES["plain"]).pack(side="left", padx=(0, 8))
         self.label(row, "ose Alt+E dhe Alt+C", size=13, color=GRAPHITE).pack(side="left", padx=(4, 0))
         return row
+
+    def _wrap_with(self, frame, *labels) -> None:
+        """Let these labels wrap at the width of the column they are in."""
+        frame.bind("<Configure>", lambda e: [label.configure(wraplength=max(200, int(e.width / self.scale) - 4))
+                                              for label in labels])
+
+    def _wrap_header(self, head, label) -> None:
+        """Let the second line of a header wrap beside its buttons instead of being cut off."""
+        head.bind("<Configure>", lambda e: self._rewrap_header(head, label, e.width))
+
+    def _rewrap_header(self, head, label, width: int | None = None) -> None:
+        width = width or head.winfo_width()
+        used = sum(child.winfo_reqwidth() + round(12 * self.scale) for child in head.winfo_children()
+                   if isinstance(child, ctk.CTkButton) and child.winfo_manager())
+        label.configure(wraplength=max(200, int((width - used) / self.scale) - 16))
+
+    def _make_table(self, parent, columns) -> tuple[ttk.Treeview, tk.Frame]:
+        """A list in the program's style. Its scrollbar shows only when the list is longer than the sheet."""
+        holder = tk.Frame(parent, bg=SHEET, bd=0, highlightthickness=0)
+        holder.pack(fill="both", expand=True, padx=(8, 6), pady=(2, 10))
+        s = self.scale
+        table = ttk.Treeview(holder, columns=[c[0] for c in columns], show="headings",
+                             style="Klasa.Treeview", selectmode="browse")
+        for column, heading, anchor, width, minwidth, stretch in columns:
+            table.heading(column, text=heading, anchor=anchor)
+            table.column(column, width=round(width * s), minwidth=round(minwidth * s), stretch=stretch, anchor=anchor)
+        table.tag_configure("alt", background=ROW_ALT)
+        scrollbar = ctk.CTkScrollbar(holder, command=table.yview, fg_color="transparent",
+                                     button_color=RULE, button_hover_color=GRAPHITE)
+        table.pack(side="left", fill="both", expand=True)
+
+        def on_scroll(first, last):
+            scrollbar.set(first, last)
+            needed = float(first) > 0.0 or float(last) < 1.0
+            if needed and not scrollbar.winfo_manager():
+                scrollbar.pack(side="right", fill="y", before=table)
+            elif not needed and scrollbar.winfo_manager():
+                scrollbar.pack_forget()
+
+        table.configure(yscrollcommand=on_scroll)
+        table.bind("<Configure>", lambda e: on_scroll(*table.yview()), add="+")
+        return table, holder
+
+    def _fill_students(self, table: ttk.Treeview, students: list[Student], select: int | None = None,
+                       scroll_end: bool = False) -> None:
+        """Show a class list: number, name and the time each portrait was confirmed."""
+        table.delete(*table.get_children())
+        today = date.today()
+        shown_times = []
+        for i, student in enumerate(students):
+            shown = list_time(student.taken, today)
+            shown_times.append(shown)
+            table.insert("", "end", iid=str(i), values=(f"{i + 1}.", f"   {student.name}", f"{shown}  "),
+                         tags=("alt",) if i % 2 else ())
+        # a time from another day also shows its date, so the column grows to fit it
+        widest = max([self.list_font.measure(f"{t}  ") for t in shown_times] + [0])
+        table.column("time", width=max(round(110 * self.scale), widest + round(14 * self.scale)))
+        if select is not None and 0 <= select < len(students):
+            table.selection_set(str(select))
+            table.focus(str(select))
+            table.see(str(select))
+        elif students and scroll_end:
+            table.see(str(len(students) - 1))
+        elif students:
+            table.yview_moveto(0)
+
+    @staticmethod
+    def _on_double_click(event, table: ttk.Treeview, action):
+        if table.identify_region(event.x, event.y) == "cell":
+            action()
+            return "break"
+        return None
 
     def _fit_window(self) -> None:
         scale = ctk.ScalingTracker.get_window_scaling(self)
@@ -806,6 +1092,10 @@ class App(ctk.CTk):
         self.school_state = self.label(col, "", size=13, color=GRAPHITE, wrap=width)
         self.school_state.pack(fill="x")
         self.button(col, "Vazhdo", "ink", self.submit_school, height=54, size=17).pack(fill="x", pady=(20, 0))
+        self.rule(col).pack(fill="x", pady=(26, 14))
+        self.label(col, "Për të lexuar ose ndryshuar listat e klasave që janë ruajtur:", size=14, color=GRAPHITE,
+                   wrap=width).pack(fill="x")
+        self.button(col, "Klasat e ruajtura", "plain", self.open_saved, height=48, size=16).pack(fill="x", pady=(8, 0))
         self._update_school_preview()
 
     def _update_school_preview(self, _event=None) -> None:
@@ -863,11 +1153,14 @@ class App(ctk.CTk):
         self.button(head, "Përfundo shkollën", "plain", self.finish_school, height=40, size=14, width=170).pack(
             side="right", padx=(12, 0))
         self.button(head, "Hap dosjen", "plain", self.open_school_folder, height=40, size=14).pack(
+            side="right", padx=(12, 0))
+        self.button(head, "Klasat e ruajtura", "plain", self.open_saved, height=40, size=14, width=170).pack(
             side="right", padx=(20, 0))
         self.school_title = self.label(head, "", size=24, strong=True)
         self.school_title.pack(fill="x")
         self.school_info = self.label(head, "", size=13, color=GRAPHITE)
         self.school_info.pack(fill="x")
+        self._wrap_header(head, self.school_info)
         self.rule(screen).grid(row=1, column=0, columnspan=2, sticky="ew", padx=36)
 
         # left: the student being photographed
@@ -908,33 +1201,10 @@ class App(ctk.CTk):
         self.count_label.pack(side="right")
         self.label(top, "Klasa aktuale", size=18, strong=True).pack(side="left")
         self.rule(sheet).pack(fill="x", padx=1)
-        holder = tk.Frame(sheet, bg=SHEET, bd=0, highlightthickness=0)
-        holder.pack(fill="both", expand=True, padx=(8, 6), pady=(2, 10))
-        s = self.scale
-        self.table = ttk.Treeview(holder, columns=("nr", "name", "time"), show="headings",
-                                  style="Klasa.Treeview", selectmode="browse")
-        for column, text, anchor in (("nr", "Nr.", "e"), ("name", "   Emri dhe mbiemri", "w"), ("time", "Koha  ", "e")):
-            self.table.heading(column, text=text, anchor=anchor)
-        self.table.column("nr", width=round(54 * s), minwidth=round(40 * s), stretch=False, anchor="e")
-        self.table.column("name", width=round(240 * s), minwidth=round(120 * s), stretch=True, anchor="w")
-        self.table.column("time", width=round(110 * s), minwidth=round(90 * s), stretch=False, anchor="e")
-        self.table.tag_configure("alt", background=ROW_ALT)
-        scrollbar = ctk.CTkScrollbar(holder, command=self.table.yview, fg_color="transparent",
-                                     button_color=RULE, button_hover_color=GRAPHITE)
-        self.table.pack(side="left", fill="both", expand=True)
-
-        def on_scroll(first, last):
-            scrollbar.set(first, last)
-            needed = float(first) > 0.0 or float(last) < 1.0
-            if needed and not scrollbar.winfo_manager():
-                scrollbar.pack(side="right", fill="y", before=self.table)
-            elif not needed and scrollbar.winfo_manager():
-                scrollbar.pack_forget()
-
-        self.table.configure(yscrollcommand=on_scroll)
+        self.table, holder = self._make_table(sheet, STUDENT_COLUMNS)
         self.empty_label = self.label(holder, "Ende nuk ka emra.\nNxënësit që shtoni shfaqen këtu, sipas radhës.",
                                       size=15, color=GRAPHITE, anchor="center", justify="center")
-        self.table.bind("<Double-Button-1>", self._on_table_double_click)
+        self.table.bind("<Double-Button-1>", lambda e: self._on_double_click(e, self.table, self.edit_selected))
         self.table.bind("<F2>", lambda e: self.edit_selected())
         self.table.bind("<Delete>", lambda e: self.delete_selected())
 
@@ -943,27 +1213,10 @@ class App(ctk.CTk):
         saved = ("asnjë klasë e ruajtur ende" if n == 0 else
                  "1 klasë e ruajtur" if n == 1 else f"{n} klasa të ruajtura")
         self.school_title.configure(text=self.school_dir.name)
-        self.school_info.configure(text=f"{self.school_dir}   ({saved})")
+        self.school_info.configure(text=f"{self.school_dir}   {keep_together(f'({saved})')}")
 
     def _refresh_list(self, select: int | None = None) -> None:
-        table = self.table
-        table.delete(*table.get_children())
-        today = date.today()
-        shown_times = []
-        for i, student in enumerate(self.students):
-            shown = list_time(student.taken, today)
-            shown_times.append(shown)
-            table.insert("", "end", iid=str(i), values=(f"{i + 1}.", f"   {student.name}", f"{shown}  "),
-                         tags=("alt",) if i % 2 else ())
-        # a time from another day also shows its date, so the column grows to fit it
-        widest = max([self.list_font.measure(f"{t}  ") for t in shown_times] + [0])
-        table.column("time", width=max(round(110 * self.scale), widest + round(14 * self.scale)))
-        if select is not None and 0 <= select < len(self.students):
-            table.selection_set(str(select))
-            table.focus(str(select))
-            table.see(str(select))
-        elif self.students:
-            table.see(str(len(self.students) - 1))
+        self._fill_students(self.table, self.students, select, scroll_end=True)
         self.count_label.configure(text=f"{len(self.students)} nxënës")
         if self.students:
             self.empty_label.place_forget()
@@ -973,12 +1226,6 @@ class App(ctk.CTk):
     def _selected(self) -> int | None:
         selection = self.table.selection()
         return int(selection[0]) if selection else None
-
-    def _on_table_double_click(self, event):
-        if self.table.identify_region(event.x, event.y) == "cell":
-            self.edit_selected()
-            return "break"
-        return None
 
     # ---------------------------------------------------------------- actions
     def add_student(self) -> None:
@@ -1239,6 +1486,700 @@ class App(ctk.CTk):
         except Exception as exc:
             self.set_status(f"Dosja nuk u hap: {exc}", "error")
 
+    # ---------------------------------------------------------------- saved classes: schools and classes
+    def _build_browse_screen(self) -> None:
+        screen = self.browse_screen = ctk.CTkFrame(self, fg_color=PAPER, corner_radius=0)
+        screen.grid_columnconfigure(0, weight=5, uniform="cols")
+        screen.grid_columnconfigure(1, weight=6, uniform="cols")
+        screen.grid_rowconfigure(2, weight=1)
+
+        head = ctk.CTkFrame(screen, fg_color="transparent")
+        head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=36, pady=(22, 14))
+        self.button(head, "Kthehu", "plain", self._browse_back, height=40, size=14).pack(side="right", padx=(12, 0))
+        self.browse_folder_button = self.button(head, "Hap dosjen", "plain", self._browse_open_folder,
+                                                height=40, size=14)
+        self.browse_title = self.label(head, "", size=24, strong=True)
+        self.browse_title.pack(fill="x")
+        self.browse_info = self.label(head, "", size=13, color=GRAPHITE)
+        self.browse_info.pack(fill="x")
+        self._wrap_header(head, self.browse_info)
+        self.browse_head = head
+        self.rule(screen).grid(row=1, column=0, columnspan=2, sticky="ew", padx=36)
+
+        left = ctk.CTkFrame(screen, fg_color="transparent")
+        left.grid(row=2, column=0, sticky="nsew", padx=(36, 20), pady=(22, 24))
+        self.browse_heading = self.label(left, "", size=20, strong=True)
+        self.browse_heading.pack(fill="x")
+        self.browse_hint = self.label(left, "", size=14, color=GRAPHITE, wrap=380)
+        self.browse_hint.pack(fill="x", pady=(0, 14))
+        self.browse_open_button = self.button(left, "", "ink", self._browse_open, height=56, size=18)
+        self.browse_open_button.pack(fill="x")
+        self.browse_status = self.label(left, "", size=15, color=GRAPHITE, wrap=380)
+        self.browse_status.pack(fill="x", pady=(14, 0))
+        self._wrap_with(left, self.browse_hint, self.browse_status)
+
+        right = ctk.CTkFrame(screen, fg_color="transparent")
+        right.grid(row=2, column=1, sticky="nsew", padx=(20, 36), pady=(22, 24))
+        sheet = ctk.CTkFrame(right, fg_color=SHEET, corner_radius=10, border_width=1, border_color=RULE)
+        sheet.pack(fill="both", expand=True)
+        top = ctk.CTkFrame(sheet, fg_color="transparent")
+        top.pack(fill="x", padx=20, pady=(14, 10))
+        self.browse_count = self.label(top, "", size=18, strong=True, color=INK)
+        self.browse_count.pack(side="right")
+        self.browse_sheet_title = self.label(top, "", size=18, strong=True)
+        self.browse_sheet_title.pack(side="left")
+        self.rule(sheet).pack(fill="x", padx=1)
+        self.browse_table, holder = self._make_table(sheet, (("name", "", "w", 240, 120, True),
+                                                             ("count", "", "e", 90, 70, False),
+                                                             ("extra", "", "e", 170, 90, False)))
+        self.browse_empty = self.label(holder, "", size=15, color=GRAPHITE, anchor="center", justify="center")
+        self.browse_table.bind("<Double-Button-1>",
+                               lambda e: self._on_double_click(e, self.browse_table, self._browse_open))
+
+    def open_saved(self) -> None:
+        """Klasat e ruajtura: every school from the start screen, this school's classes during a session."""
+        if self.modal is not None:
+            return
+        if self.screen == "class" and self.school_dir is not None:
+            self.browse_from = "class"
+            self._show_classes(self.school_dir)
+        else:
+            self.browse_from = "school"
+            self._show_schools()
+        self._show_screen("browse")
+
+    def _fill_browse(self, rows: list[tuple[str, str, str]], select: int | None, empty: str) -> None:
+        table = self.browse_table
+        table.delete(*table.get_children())
+        for i, (name, count, extra) in enumerate(rows):
+            table.insert("", "end", iid=str(i), values=(f"   {name}", f"{count}  ", f"{extra}  "),
+                         tags=("alt",) if i % 2 else ())
+        pad = round(14 * self.scale)
+        for k, column, least in ((1, "count", 90), (2, "extra", 110)):
+            widest = max([self.list_font.measure(f"{row[k]}  ") for row in rows] + [0])
+            table.column(column, width=max(round(least * self.scale), widest + pad))
+        if rows:
+            pick = select if select is not None and 0 <= select < len(rows) else 0
+            table.selection_set(str(pick))
+            table.focus(str(pick))
+            table.see(str(pick))
+            self.browse_empty.place_forget()
+        else:
+            self.browse_empty.configure(text=empty)
+            self.browse_empty.place(relx=0.5, rely=0.45, anchor="center")
+        self.browse_status.configure(text="")
+
+    def _browse_headings(self, name: str, count: str, extra: str) -> None:
+        table = self.browse_table
+        table.heading("name", text=f"   {name}")
+        table.heading("count", text=f"{count}  ")
+        table.heading("extra", text=f"{extra}  ")
+
+    def _show_schools(self, select_name: str | None = None) -> None:
+        self.browse_level, self.browse_dir = "schools", None
+        rows = list_schools(self.documents)
+        self.browse_rows = [folder for folder, _, _ in rows]
+        n = len(rows)
+        self.browse_title.configure(text="Klasat e ruajtura")
+        self.browse_info.configure(text=f"Shkollat me klasa të ruajtura te {self.documents}")
+        self.browse_folder_button.pack_forget()
+        self._rewrap_header(self.browse_head, self.browse_info)
+        self.browse_heading.configure(text="Zgjidhni shkollën")
+        self.browse_hint.configure(text="Klikoni dy herë mbi shkollën, ose zgjidheni dhe shtypni Enter.")
+        self.browse_open_button.configure(text="Hap shkollën")
+        self.browse_sheet_title.configure(text="Shkollat")
+        self.browse_count.configure(text="1 shkollë" if n == 1 else f"{n} shkolla")
+        self._browse_headings("Shkolla", "Klasa", "Nxënës")
+        names = [folder.name for folder in self.browse_rows]
+        self._fill_browse([(folder.name, str(classes), str(students)) for folder, classes, students in rows],
+                          names.index(select_name) if select_name in names else None,
+                          "Ende nuk ka klasa të ruajtura.\nKlasat që përfundoni shfaqen këtu, sipas shkollës.")
+
+    def _show_classes(self, school_dir: Path, select_name: str | None = None) -> None:
+        self.browse_level, self.browse_dir = "classes", school_dir
+        rows = list_classes(school_dir)
+        self.browse_rows = [name for name, _, _, _ in rows]
+        n, total = len(rows), sum(count for _, _, count, _ in rows)
+        summary = ("asnjë klasë e ruajtur" if n == 0 else
+                   f"1 klasë e ruajtur me {total} nxënës" if n == 1 else
+                   f"{n} klasa të ruajtura, {total} nxënës gjithsej")
+        self.browse_title.configure(text=school_dir.name)
+        self.browse_info.configure(text=f"{school_dir}   {keep_together(f'({summary})')}")
+        if not self.browse_folder_button.winfo_manager():
+            self.browse_folder_button.pack(side="right", padx=(12, 0), before=self.browse_title)
+        self._rewrap_header(self.browse_head, self.browse_info)
+        self.browse_heading.configure(text="Zgjidhni klasën")
+        self.browse_hint.configure(text="Klikoni dy herë mbi klasën, ose zgjidheni dhe shtypni Enter. "
+                                        "Lista hapet për t'u lexuar dhe ndryshuar.")
+        self.browse_open_button.configure(text="Hap klasën")
+        self.browse_sheet_title.configure(text="Klasat")
+        self.browse_count.configure(text="1 klasë" if n == 1 else f"{n} klasa")
+        self._browse_headings("Klasa", "Nxënës", "Ruajtur më")
+        self._fill_browse([(name, str(count), f"{saved:%d.%m.%Y %H:%M}" if saved else "")
+                           for name, _, count, saved in rows],
+                          self.browse_rows.index(select_name) if select_name in self.browse_rows else None,
+                          "Kjo shkollë nuk ka ende klasa të ruajtura.\nKlasat që përfundoni shfaqen këtu.")
+
+    def _browse_selected(self) -> int | None:
+        selection = self.browse_table.selection()
+        return int(selection[0]) if selection else None
+
+    def _browse_open(self) -> None:
+        if self.modal is not None:
+            return
+        i = self._browse_selected()
+        if i is None:
+            if self.browse_rows:
+                self.set_status("Zgjidhni një rresht në listë.", "warn")
+            return
+        if self.browse_level == "schools":
+            self._show_classes(self.browse_rows[i])
+            self.focus_input()
+        else:
+            self._open_class_editor(self.browse_rows[i])
+
+    def _browse_back(self) -> None:
+        if self.modal is not None:
+            return
+        if self.browse_level == "classes" and self.browse_from == "school":
+            self._show_schools(select_name=self.browse_dir.name)
+            self.focus_input()
+        elif self.browse_from == "class":
+            self._update_header()
+            self._show_screen("class")
+        else:
+            self._update_school_preview()
+            self._show_screen("school")
+
+    def _browse_open_folder(self) -> None:
+        if self.browse_dir is not None:
+            self._open(self.browse_dir)
+
+    # ---------------------------------------------------------------- saved classes: one class list
+    def _build_editor_screen(self) -> None:
+        screen = self.editor_screen = ctk.CTkFrame(self, fg_color=PAPER, corner_radius=0)
+        screen.grid_columnconfigure(0, weight=5, uniform="cols")
+        screen.grid_columnconfigure(1, weight=6, uniform="cols")
+        screen.grid_rowconfigure(2, weight=1)
+
+        head = ctk.CTkFrame(screen, fg_color="transparent")
+        head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=36, pady=(22, 14))
+        self.button(head, "Kthehu", "plain", self._editor_back, height=40, size=14).pack(side="right", padx=(12, 0))
+        self.button(head, "Hap në Notepad", "plain", self.ed_notepad, height=40, size=14, width=160).pack(
+            side="right", padx=(12, 0))
+        self.ed_restore_button = self.button(head, "Kthe versionin e mëparshëm", "plain", self.ed_restore,
+                                             height=40, size=14, width=230)
+        self.editor_title = self.label(head, "", size=24, strong=True)
+        self.editor_title.pack(fill="x")
+        self.editor_info = self.label(head, "", size=13, color=GRAPHITE)
+        self.editor_info.pack(fill="x")
+        self.rule(screen).grid(row=1, column=0, columnspan=2, sticky="ew", padx=36)
+
+        # left: what can be done with the list. The save row is packed first so it never gets squeezed out.
+        left = ctk.CTkFrame(screen, fg_color="transparent")
+        left.grid(row=2, column=0, sticky="nsew", padx=(36, 20), pady=(22, 24))
+        bottom = ctk.CTkFrame(left, fg_color="transparent")
+        bottom.pack(side="bottom", fill="x", pady=(0, 6))
+        self.rule(bottom).pack(fill="x", pady=(0, 12))
+        self.ed_state = self.label(bottom, "", size=14, color=GRAPHITE)
+        self.ed_state.pack(fill="x")
+        row = ctk.CTkFrame(bottom, fg_color="transparent")
+        row.pack(fill="x", pady=(6, 0))
+        row.grid_columnconfigure(0, weight=2, uniform="save")
+        row.grid_columnconfigure(1, weight=3, uniform="save")
+        self.button(row, "Hidh ndryshimet", "plain", self.ed_discard, height=56, size=15).grid(
+            row=0, column=0, sticky="ew", padx=(0, 6))
+        self.button(row, "Ruaj ndryshimet", "green", self.ed_save, height=56, size=18).grid(
+            row=0, column=1, sticky="ew", padx=(6, 0))
+
+        self.label(left, "Ndrysho listën", size=20, strong=True).pack(fill="x")
+        hint = self.label(left, "Zgjidhni një emër në listë, pastaj atë që doni të bëni.", size=14,
+                          color=GRAPHITE, wrap=380)
+        hint.pack(fill="x", pady=(0, 12))
+        for caption, style, command in (("Shto emër", "plain", self.ed_add),
+                                        ("Ndrysho emrin", "plain", self.ed_edit),
+                                        ("Fshi nga lista", "plain-red", self.ed_delete),
+                                        ("Zhvendos në klasë tjetër", "plain", self.ed_move),
+                                        ("Rendit sipas alfabetit", "plain", self.ed_sort)):
+            self.button(left, caption, style, command, height=40, size=15).pack(fill="x", pady=(0, 8))
+        self.ed_status = self.label(left, "", size=15, color=GRAPHITE, wrap=380)
+        self.ed_status.pack(fill="x", pady=(6, 0))
+        self._wrap_with(left, hint, self.ed_status)
+
+        # right: the list as it will be written
+        right = ctk.CTkFrame(screen, fg_color="transparent")
+        right.grid(row=2, column=1, sticky="nsew", padx=(20, 36), pady=(22, 24))
+        notes = ctk.CTkFrame(right, fg_color="transparent")
+        notes.pack(side="bottom", fill="x", pady=(10, 0))
+        self.ed_path = self.label(notes, "", size=13, color=GRAPHITE, wrap=480)
+        self.ed_path.pack(fill="x")
+        tip = self.label(notes, "Ndryshimet shkruhen në skedar vetëm me Ruaj ndryshimet (ose Ctrl+S).", size=13,
+                         color=GRAPHITE, wrap=480)
+        tip.pack(fill="x", pady=(2, 0))
+        self._wrap_with(right, self.ed_path, tip)
+        sheet = ctk.CTkFrame(right, fg_color=SHEET, corner_radius=10, border_width=1, border_color=RULE)
+        sheet.pack(side="top", fill="both", expand=True)
+        top = ctk.CTkFrame(sheet, fg_color="transparent")
+        top.pack(fill="x", padx=20, pady=(14, 10))
+        self.ed_count = self.label(top, "", size=18, strong=True, color=INK)
+        self.ed_count.pack(side="right")
+        self.label(top, "Lista e klasës", size=18, strong=True).pack(side="left")
+        self.rule(sheet).pack(fill="x", padx=1)
+        self.ed_table, holder = self._make_table(sheet, STUDENT_COLUMNS)
+        self.ed_empty = self.label(holder, "Lista është bosh.", size=15, color=GRAPHITE, anchor="center",
+                                   justify="center")
+        self.ed_table.bind("<Double-Button-1>", lambda e: self._on_double_click(e, self.ed_table, self.ed_edit))
+        self.ed_table.bind("<F2>", lambda e: self.ed_edit())
+        self.ed_table.bind("<Delete>", lambda e: self.ed_delete())
+
+    def _open_class_editor(self, class_name: str) -> None:
+        txt = class_file(self.browse_dir, class_name)
+        try:
+            students = read_students(txt)
+        except OSError as exc:
+            self.set_status(f"Lista nuk u lexua: {exc.strerror or exc}", "error")
+            return
+        self.ed_class = class_name
+        self.ed_students, self.ed_loaded = list(students), list(students)
+        self.ed_signature, self.ed_external = file_signature(txt), False
+        self.editor_title.configure(text=f"Klasa {class_name}")
+        self.editor_info.configure(text=self.browse_dir.name)
+        self.ed_path.configure(text=f"Skedari: {txt}")
+        self._show_screen("editor")
+        self._editor_refresh()
+        order = ", renditur sipas alfabetit shqip" if is_alphabetical(students) else ""
+        self.set_status(f"Lista ka {len(students)} nxënës{order}.", "info")
+        self._schedule_watch()
+
+    def _editor_dirty(self) -> bool:
+        return self.ed_students != self.ed_loaded
+
+    def _editor_refresh(self, select: int | None = None) -> None:
+        self._fill_students(self.ed_table, self.ed_students, select)
+        if select is None and self.ed_students:
+            self.ed_table.focus("0")  # the arrow keys start at the top
+        n = len(self.ed_students)
+        self.ed_count.configure(text=f"{n} nxënës")
+        if n:
+            self.ed_empty.place_forget()
+        else:
+            self.ed_empty.place(relx=0.5, rely=0.45, anchor="center")
+        dirty = self._editor_dirty()
+        self.ed_state.configure(text="Ka ndryshime që nuk janë ruajtur." if dirty else
+                                "Të gjitha ndryshimet janë ruajtur.", text_color=AMBER if dirty else GRAPHITE)
+        has_copy = backup_path(self.browse_dir, self.ed_class).is_file()
+        if has_copy and not self.ed_restore_button.winfo_manager():
+            self.ed_restore_button.pack(side="right", padx=(12, 0), before=self.editor_title)
+        elif not has_copy and self.ed_restore_button.winfo_manager():
+            self.ed_restore_button.pack_forget()
+
+    def _reload_editor(self, keep_selection: bool = False) -> bool:
+        """Show the list as it is in the file now, dropping unsaved changes."""
+        txt = class_file(self.browse_dir, self.ed_class)
+        try:
+            students = read_students(txt) if txt.is_file() else []
+        except OSError as exc:
+            self.set_status(f"Lista nuk u lexua: {exc.strerror or exc}", "error")
+            return False
+        selected = self._ed_selected() if keep_selection else None
+        self.ed_students, self.ed_loaded = list(students), list(students)
+        self.ed_signature, self.ed_external = file_signature(txt), False
+        self._editor_refresh(select=min(selected, len(students) - 1) if selected is not None and students else None)
+        return True
+
+    def _ed_selected(self) -> int | None:
+        selection = self.ed_table.selection()
+        return int(selection[0]) if selection else None
+
+    def _ed_pick(self) -> int | None:
+        i = self._ed_selected()
+        if i is None:
+            self.set_status("Zgjidhni një emër në listë, pastaj provoni përsëri.", "warn")
+        return i
+
+    def _keep_one_student(self) -> None:
+        modal = Modal(self, "Lista nuk mund të mbetet bosh", default="ok", cancel="ok",
+                      buttons=[("ok", "Në rregull", "ink")])
+        modal.add_text(f"Ky është nxënësi i vetëm i klasës {self.ed_class}. Një klasë e ruajtur duhet të ketë "
+                       "të paktën një nxënës.")
+        modal.add_text("Nëse klasa nuk duhet fare, fshijeni dosjen e saj te Dokumentet.")
+        self.ask(modal)
+
+    def _file_error(self, title: str, exc: OSError, filename: str) -> None:
+        modal = Modal(self, title, default="ok", cancel="ok", buttons=[("ok", "Në rregull", "ink")])
+        if isinstance(exc, PermissionError):
+            modal.add_text(f"Skedari {filename} është i hapur ose i bllokuar nga një program tjetër "
+                           "(p.sh. Excel). Mbylleni atë dhe provoni përsëri.")
+        else:
+            modal.add_text(f"Gabimi: {exc.strerror or exc}")
+        modal.add_text("Lista këtu nuk ndryshoi, asgjë nuk humbet.", color=TEXT)
+        self.ask(modal)
+
+    def ed_add(self) -> None:
+        if self.modal is not None:
+            return
+        alphabetical = keeps_alphabetical(self.ed_students)
+        modal = Modal(self, "Shto emër", default="add", cancel="cancel",
+                      buttons=[("cancel", "Anulo", "plain"), ("add", "Shto emrin", "ink")])
+        modal.add_text(f"Emri shtohet në listën e klasës {self.ed_class}, pa orë fotografimi. "
+                       + ("Lista është sipas alfabetit, prandaj emri vendoset në vendin e vet." if alphabetical
+                          else "Emri vendoset në fund të listës."))
+        field = self.entry(modal.body, height=54, size=22)
+        field.pack(fill="x", pady=(12, 0))
+        modal.watch(field)
+        self._letter_row(modal.body, field).pack(anchor="w", pady=(8, 0))
+        chosen = {}
+
+        def validate(_key):
+            chosen["name"] = clean_name(field.get())
+            return None if chosen["name"] else "Shkruani emrin dhe mbiemrin e nxënësit."
+
+        modal.validate, modal.focus_widget = validate, field
+        if self.ask(modal) != "add":
+            return
+        name = chosen["name"]
+        twin = next((i for i, s in enumerate(self.ed_students) if same_name(s.name) == same_name(name)), None)
+        if twin is not None:
+            modal = Modal(self, "Ky emër është tashmë në listë", default="add", cancel="cancel",
+                          buttons=[("cancel", "Anulo", "plain"), ("add", "Shto gjithsesi", "ink")])
+            modal.add_text(f"{self.ed_students[twin].name} është tashmë në listë (nr. {twin + 1}). Nëse është "
+                           "nxënës tjetër me të njëjtin emër, shtojeni gjithsesi.")
+            if self.ask(modal) != "add":
+                return
+        student = Student(name)
+        self.ed_students = insert_student(self.ed_students, student)
+        pos = next(i for i, s in enumerate(self.ed_students) if s is student)
+        self._editor_refresh(select=pos)
+        self.set_status(f"U shtua: {name} (nr. {pos + 1}).", "ok")
+
+    def ed_edit(self) -> None:
+        if self.modal is not None:
+            return
+        i = self._ed_pick()
+        if i is None:
+            return
+        old = self.ed_students[i]
+        modal = Modal(self, "Ndrysho emrin", default="save", cancel="cancel",
+                      buttons=[("cancel", "Anulo", "plain"), ("save", "Ruaj emrin", "ink")])
+        modal.add_text(f"Nr. {i + 1} në klasën {self.ed_class}{self._taken_phrase(old.taken)}.")
+        field = self.entry(modal.body, height=54, size=22)
+        field.pack(fill="x", pady=(12, 0))
+        field.insert(0, old.name)
+        field.select_range(0, "end")
+        field.icursor("end")
+        modal.watch(field)
+        self._letter_row(modal.body, field).pack(anchor="w", pady=(8, 0))
+        chosen = {}
+
+        def validate(_key):
+            chosen["name"] = clean_name(field.get())
+            return None if chosen["name"] else "Emri nuk mund të jetë bosh."
+
+        modal.validate, modal.focus_widget = validate, field
+        if self.ask(modal) != "save" or chosen["name"] == old.name:
+            return
+        alphabetical = is_alphabetical(self.ed_students)
+        updated = Student(chosen["name"], old.taken)  # the photo time stays the same
+        students = list(self.ed_students)
+        students[i] = updated
+        if alphabetical:  # an alphabetical list stays alphabetical
+            students = sorted(students, key=lambda s: albanian_sort_key(s.name))
+        self.ed_students = students
+        pos = next(k for k, s in enumerate(students) if s is updated)
+        self._editor_refresh(select=pos)
+        moved = f" Tani është nr. {pos + 1}, sipas alfabetit." if pos != i else ""
+        self.set_status(f"Emri u ndryshua në {updated.name} (ishte {old.name}).{moved}", "ok")
+
+    def ed_delete(self) -> None:
+        if self.modal is not None:
+            return
+        i = self._ed_pick()
+        if i is None:
+            return
+        if len(self.ed_students) == 1:
+            self._keep_one_student()
+            return
+        student = self.ed_students[i]
+        modal = Modal(self, "Të fshihet nga lista?", default="delete", cancel="cancel",
+                      buttons=[("cancel", "Anulo", "plain"), ("delete", "Fshi", "red")])
+        modal.add_text(student.name, color=TEXT, size=22, strong=True, pady=(14, 0))
+        modal.add_text(f"Nr. {i + 1} në klasën {self.ed_class}{self._taken_phrase(student.taken)}.", pady=(2, 0))
+        if self.ask(modal) != "delete":
+            return
+        self.ed_students = self.ed_students[:i] + self.ed_students[i + 1:]
+        self._editor_refresh(select=min(i, len(self.ed_students) - 1))
+        self.set_status(f"U fshi nga lista: {student.name}.", "info")
+
+    def ed_sort(self) -> None:
+        if self.modal is not None:
+            return
+        ordered = sorted(self.ed_students, key=lambda s: albanian_sort_key(s.name))
+        if ordered == self.ed_students:
+            self.set_status("Lista është tashmë sipas alfabetit shqip.", "info")
+            return
+        i = self._ed_selected()
+        chosen = self.ed_students[i] if i is not None else None
+        self.ed_students = ordered
+        pos = next((k for k, s in enumerate(ordered) if s is chosen), None)
+        self._editor_refresh(select=pos)
+        self.set_status("Lista u rendit sipas alfabetit shqip.", "ok")
+
+    def ed_move(self) -> None:
+        if self.modal is not None:
+            return
+        i = self._ed_pick()
+        if i is None:
+            return
+        if len(self.ed_students) == 1:
+            self._keep_one_student()
+            return
+        student = self.ed_students[i]
+        classes = [name for name, _, _, _ in list_classes(self.browse_dir)]
+        others = [name for name in classes if name != self.ed_class]
+        modal = Modal(self, "Zhvendos në klasë tjetër", default="move", cancel="cancel",
+                      buttons=[("cancel", "Anulo", "plain"), ("move", "Zhvendos", "ink")])
+        modal.add_text(student.name, color=TEXT, size=22, strong=True, pady=(14, 0))
+        modal.add_text(f"Nr. {i + 1} në klasën {self.ed_class}{self._taken_phrase(student.taken)}.", pady=(2, 0))
+        self.label(modal.body, "Klasa ku shkon", size=15, strong=True).pack(fill="x", pady=(18, 4))
+        combo = ctk.CTkComboBox(modal.body, values=others, variable=tk.StringVar(master=self, value=""),
+                                height=52, corner_radius=8, border_width=2, font=self.font(20),
+                                dropdown_font=self.font(16), border_color=INK, button_color=INK_TINT,
+                                button_hover_color="#C9D2F0", fg_color=SHEET, text_color=TEXT,
+                                dropdown_fg_color=SHEET, dropdown_hover_color=INK_TINT, dropdown_text_color=TEXT,
+                                command=lambda _value: picked())
+        combo.pack(fill="x")
+        preview = self.label(modal.body, "", size=13, color=GRAPHITE, wrap=modal.width)
+        preview.pack(fill="x", pady=(6, 0))
+        if self._editor_dirty():
+            modal.add_text(f"Ndryshimet e tjera në listën e klasës {self.ed_class} ruhen bashkë me zhvendosjen.",
+                           color=AMBER, size=14, pady=(12, 0))
+
+        def resolve(raw):
+            """The class the typed name means: an existing class (any capitals) or a new one."""
+            folder = folder_name(raw)
+            match = next((name for name in classes if name.casefold() == folder.casefold()), None) if folder else None
+            return (match, True) if match else (folder, False)
+
+        def update_preview():
+            raw = combo.get()
+            folder, exists = resolve(raw)
+            if not raw.strip():
+                preview.configure(text="Zgjidhni klasën nga lista, ose shkruani emrin e një klase të re." if others
+                                  else "Shkruani emrin e klasës ku shkon nxënësi, p.sh. X-2.", text_color=GRAPHITE)
+            elif not folder:
+                preview.configure(text="Ky emër nuk mund të përdoret si emër dosjeje.", text_color=RED)
+            elif folder == self.ed_class:
+                preview.configure(text="Nxënësi është tashmë në këtë klasë.", text_color=RED)
+            elif exists:
+                try:
+                    target = read_students(class_file(self.browse_dir, folder))
+                except OSError:
+                    target = []
+                twin = next((k for k, s in enumerate(target) if same_name(s.name) == same_name(student.name)), None)
+                if twin is not None:
+                    preview.configure(text=f"Klasa {folder} ka tashmë një nxënës me emrin {target[twin].name} "
+                                           f"(nr. {twin + 1}). Nëse është nxënës tjetër, vazhdoni.",
+                                      text_color=AMBER)
+                else:
+                    where = "sipas alfabetit" if keeps_alphabetical(target) else "në fund të listës"
+                    preview.configure(text=f"Klasa {folder} ka {len(target)} nxënës. Emri shtohet {where}.",
+                                      text_color=GRAPHITE)
+            else:
+                preview.configure(text=f"Klasa {folder} nuk ekziston ende. Krijohet me këtë nxënës: "
+                                       f"{class_file(self.browse_dir, folder)}", text_color=GRAPHITE)
+
+        def picked():
+            modal.clear_error()
+            update_preview()
+
+        modal.watch(combo, update_preview)
+        update_preview()
+        chosen = {}
+
+        def validate(_key):
+            raw = combo.get()
+            if not raw.strip():
+                return "Zgjidhni ose shkruani klasën, p.sh. X-2."
+            folder, exists = resolve(raw)
+            if not folder:
+                return "Ky emër nuk mund të përdoret si emër dosjeje."
+            if folder == self.ed_class:
+                return "Nxënësi është tashmë në këtë klasë."
+            chosen["folder"] = folder
+            return None
+
+        modal.validate, modal.focus_widget = validate, combo
+        if self.ask(modal) != "move" or not self._confirm_overwrite():
+            return
+        target_class = chosen["folder"]
+        remaining = self.ed_students[:i] + self.ed_students[i + 1:]
+        try:
+            target = move_student(self.browse_dir, self.ed_class, remaining, target_class, student)
+        except OSError as exc:
+            self._file_error("Nxënësi nuk u zhvendos", exc, f"{target_class}.txt / {self.ed_class}.txt")
+            return
+        self.ed_students, self.ed_loaded = list(remaining), list(remaining)
+        self.ed_signature = file_signature(class_file(self.browse_dir, self.ed_class))
+        self.ed_external = False
+        self._editor_refresh(select=min(i, len(remaining) - 1))
+        pos = next(k for k, s in enumerate(target) if s is student)
+        self.set_status(f"{student.name} u zhvendos në klasën {target_class} (nr. {pos + 1} nga {len(target)}). "
+                        "Të dyja listat u ruajtën.", "ok")
+
+    def _file_changed_outside(self) -> bool:
+        current = file_signature(class_file(self.browse_dir, self.ed_class))
+        return current is not None and current != self.ed_signature
+
+    def _confirm_overwrite(self) -> bool:
+        """If the file was saved by another program after it was read here, ask which list to keep."""
+        if not self._file_changed_outside():
+            return True
+        modal = Modal(self, "Skedari u ndryshua jashtë programit", default="cancel", cancel="cancel", width=580,
+                      buttons=[("cancel", "Anulo", "plain"), ("reload", "Lexo skedarin", "plain"),
+                               ("overwrite", "Ruaj gjithsesi", "red")])
+        modal.add_text(f"{self.ed_class}.txt u ndryshua pasi u hap këtu, ndoshta në Notepad.")
+        modal.add_text("Lexo skedarin: shfaqet lista siç është tani në skedar, ndryshimet e bëra këtu hidhen.",
+                       color=TEXT, pady=(14, 0))
+        modal.add_text("Ruaj gjithsesi: ruhet lista nga ky program, ndërsa ajo nga skedari mbahet si kopje.",
+                       color=TEXT, pady=(6, 0))
+        choice = self.ask(modal)
+        if choice == "reload" and self._reload_editor():
+            self.set_status("Lista u lexua nga skedari. Ndryshimet e bëra këtu u hodhën.", "info")
+        return choice == "overwrite"
+
+    def ed_save(self) -> None:
+        if self.modal is not None or self.screen != "editor":
+            return
+        txt = class_file(self.browse_dir, self.ed_class)
+        if not self._editor_dirty() and file_matches(txt, class_file_lines(self.ed_students, self.ed_class)):
+            self.set_status("Nuk ka ndryshime për të ruajtur.", "info")
+            return
+        self._save_editor()
+
+    def _save_editor(self) -> bool:
+        if not self.ed_students:
+            self._keep_one_student()
+            return False
+        if not self._confirm_overwrite():
+            return False
+        try:
+            backed_up = save_edited_class(self.browse_dir, self.ed_class, self.ed_students)
+        except OSError as exc:
+            self._file_error("Lista nuk u ruajt", exc, f"{self.ed_class}.txt")
+            return False
+        self.ed_loaded = list(self.ed_students)
+        self.ed_signature = file_signature(class_file(self.browse_dir, self.ed_class))
+        self.ed_external = False
+        self._editor_refresh(select=self._ed_selected())
+        self.set_status(f"Ndryshimet u ruajtën te {self.ed_class}.txt."
+                        + (" Versioni i mëparshëm mbahet si kopje." if backed_up else ""), "ok")
+        return True
+
+    def ed_discard(self) -> None:
+        if self.modal is not None:
+            return
+        if not self._editor_dirty():
+            self.set_status("Nuk ka ndryshime për të hedhur.", "info")
+            return
+        modal = Modal(self, "Të hidhen ndryshimet?", default="cancel", cancel="cancel",
+                      buttons=[("cancel", "Anulo", "plain"), ("discard", "Hidhi", "red")])
+        modal.add_text(f"Lista kthehet siç është në skedarin {self.ed_class}.txt.")
+        if self.ask(modal) == "discard" and self._reload_editor():
+            self.set_status("Ndryshimet u hodhën. Lista është siç është në skedar.", "info")
+
+    def ed_restore(self) -> None:
+        if self.modal is not None:
+            return
+        backup = backup_path(self.browse_dir, self.ed_class)
+        try:
+            count, saved = count_names_in(backup), datetime.fromtimestamp(backup.stat().st_mtime)
+        except OSError:
+            self.set_status("Nuk ka kopje për këtë klasë.", "info")
+            return
+        modal = Modal(self, "Të kthehet versioni i mëparshëm?", default="restore", cancel="cancel",
+                      buttons=[("cancel", "Anulo", "plain"), ("restore", "Ktheje", "ink")])
+        modal.add_text(f"Kopja e klasës {self.ed_class} ka {count} nxënës dhe është ruajtur më "
+                       f"{saved:%d.%m.%Y} në orën {saved:%H:%M}.", color=TEXT)
+        modal.add_text("Lista që është tani në skedar mbahet si kopje, prandaj mund ta ktheni sërish me të "
+                       "njëjtin buton.")
+        if self._editor_dirty():
+            modal.add_text("Ndryshimet që nuk janë ruajtur humbasin.", color=AMBER, size=14, pady=(12, 0))
+        if self.ask(modal) != "restore":
+            return
+        try:
+            restore_backup(self.browse_dir, self.ed_class)
+        except OSError as exc:
+            self._file_error("Versioni i mëparshëm nuk u kthye", exc, f"{self.ed_class}.txt")
+            return
+        if self._reload_editor():
+            self.set_status(f"U kthye versioni i mëparshëm i klasës {self.ed_class} "
+                            f"({len(self.ed_students)} nxënës).", "ok")
+
+    def ed_notepad(self) -> None:
+        if self.modal is not None:
+            return
+        if self._editor_dirty():
+            modal = Modal(self, "Ka ndryshime që nuk janë ruajtur", default="save", cancel="cancel", width=560,
+                          buttons=[("cancel", "Anulo", "plain"), ("discard", "Mos i ruaj", "plain-red"),
+                                   ("save", "Ruaj dhe hap", "green")])
+            modal.add_text("Notepad tregon listën siç është në skedar. Ruajini ndryshimet para se ta hapni, "
+                           "që të shihni listën e fundit.")
+            choice = self.ask(modal)
+            if choice == "save":
+                if not self._save_editor():
+                    return
+            elif choice != "discard" or not self._reload_editor():
+                return
+        try:
+            open_in_notepad(class_file(self.browse_dir, self.ed_class))
+        except Exception as exc:
+            self.set_status(f"Notepad nuk u hap: {exc}", "error")
+            return
+        self.set_status("Lista u hap në Notepad. Kur ta ruani atje, lista këtu lexohet sërish vetë.", "info")
+
+    def _guard_unsaved(self) -> bool:
+        """Before leaving a list with unsaved changes: save them, drop them or stay. True means go on."""
+        if not self._editor_dirty():
+            return True
+        modal = Modal(self, "Ndryshimet nuk janë ruajtur", default="save", cancel="cancel", width=560,
+                      buttons=[("cancel", "Anulo", "plain"), ("discard", "Mos i ruaj", "plain-red"),
+                               ("save", "Ruaj ndryshimet", "green")])
+        modal.add_text(f"Lista e klasës {self.ed_class} ka ndryshime që nuk janë ruajtur në skedar.")
+        choice = self.ask(modal)
+        if choice == "save":
+            return self._save_editor()
+        if choice == "discard":
+            self.ed_students = list(self.ed_loaded)
+            self._editor_refresh()
+            return True
+        return False
+
+    def _editor_back(self) -> None:
+        if self.modal is not None or not self._guard_unsaved():
+            return
+        self._show_classes(self.browse_dir, select_name=self.ed_class)
+        self._show_screen("browse")
+
+    def _schedule_watch(self) -> None:
+        if self._watch_job is not None:
+            self.after_cancel(self._watch_job)
+        self._watch_job = self.after(1000, self._watch_editor_file)
+
+    def _watch_editor_file(self) -> None:
+        """Notice when the open list is saved by another program (e.g. Notepad)."""
+        self._watch_job = None
+        if self.screen != "editor":
+            return
+        if self.modal is None and self._file_changed_outside():
+            if not self._editor_dirty():
+                if self._reload_editor(keep_selection=True):
+                    self.set_status("Lista u lexua sërish, sepse skedari u ndryshua jashtë programit.", "info")
+            elif not self.ed_external:
+                self.ed_external = True
+                self.set_status("Kujdes: skedari u ndryshua jashtë programit. Kur të ruani, do të pyeteni "
+                                "cilën listë të mbani.", "warn")
+        self._schedule_watch()
+
     # ---------------------------------------------------------------- ë and ç
     def _type_into(self, field: ctk.CTkEntry, letter: str) -> None:
         self._insert_letter(field._entry, letter)
@@ -1250,7 +2191,7 @@ class App(ctk.CTk):
         widget = self.focus_get()
         if isinstance(widget, tk.Entry):
             target = widget
-        elif self.modal is None:
+        elif self.modal is None and self.screen in ("class", "school"):
             target = (self.student_entry if self.screen == "class" else self.school_entry)._entry
         else:
             return "break"
@@ -1314,12 +2255,17 @@ class App(ctk.CTk):
         if self.modal is None:
             if self.screen == "check":
                 self.check_screen.focus_set()
+            elif self.screen == "browse":
+                self.browse_table.focus_set()
+            elif self.screen == "editor":
+                self.ed_table.focus_set()
             else:
                 (self.student_entry if self.screen == "class" else self.school_entry).focus_set()
 
     def _show_screen(self, name: str) -> None:
         self.screen = name
-        screens = {"check": self.check_screen, "school": self.school_screen, "class": self.class_screen}
+        screens = {"check": self.check_screen, "school": self.school_screen, "class": self.class_screen,
+                   "browse": self.browse_screen, "editor": self.editor_screen}
         for frame in screens.values():
             frame.pack_forget()
         screens[name].pack(fill="both", expand=True)
@@ -1333,6 +2279,11 @@ class App(ctk.CTk):
                 self._check_default()
         elif self.screen == "school":
             self.submit_school()
+        elif self.screen == "browse":
+            self._browse_open()
+        elif self.screen == "editor":
+            if event.widget is self.ed_table:
+                self.ed_edit()
         elif event.widget is self.table:
             self.edit_selected()
         else:
@@ -1345,7 +2296,18 @@ class App(ctk.CTk):
         elif self.screen == "class":
             self.student_entry.delete(0, "end")
             self.student_entry.focus_set()
+        elif self.screen == "browse":
+            self._browse_back()
+        elif self.screen == "editor":
+            self._editor_back()
         return "break"
+
+    def _on_save_key(self, _event):
+        """Ctrl+S saves the open class list."""
+        if self.screen == "editor" and self.modal is None:
+            self.ed_save()
+            return "break"
+        return None
 
     def _on_key(self, event):
         """Typing while the list or a button has the focus still goes into the name field."""
@@ -1358,7 +2320,9 @@ class App(ctk.CTk):
         return None
 
     def set_status(self, text: str, kind: str = "info") -> None:
-        self.status.configure(text=text, text_color=STATUS_COLORS[kind])
+        """Show a short message on the screen that is open."""
+        label = {"browse": self.browse_status, "editor": self.ed_status}.get(self.screen, self.status)
+        label.configure(text=text, text_color=STATUS_COLORS[kind])
 
     def _flash(self, entry: ctk.CTkEntry, normal: str) -> None:
         entry.configure(border_color=RED)
@@ -1368,6 +2332,8 @@ class App(ctk.CTk):
     def on_close(self) -> None:
         if self.modal is not None:
             self.modal.press_cancel()
+            return
+        if self.screen == "editor" and not self._guard_unsaved():
             return
         if self.students:
             modal = Modal(self, "Të mbyllet programi?", default="stay", cancel="stay",
@@ -1380,6 +2346,9 @@ class App(ctk.CTk):
                                "automatikisht. Nëse e mbyllni programin tani, këta emra humbasin.", color=RED)
             if self.ask(modal) != "close":
                 return
+        if self._watch_job is not None:
+            self.after_cancel(self._watch_job)
+            self._watch_job = None
         self.destroy()
 
     def report_callback_exception(self, exc, value, tb) -> None:
