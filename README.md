@@ -76,7 +76,7 @@ The program ends up in `dist\FotoNxenesit.exe`. To run it from source instead: `
 
 Tests: after `py -m pip install -r requirements.txt`, type `pytest` in the project folder.
 
-The first time each new version of the `.exe` starts, it runs the same tests in a window before opening, so a problem shows up before a photo session instead of during one. It takes a few seconds and happens once per version; the note of which version passed is kept in `Documents\FotoNxenesit`. From source, `py foto_nxenesit.py --kontrollo` shows that window.
+The first time each new version of the `.exe` starts, it runs the same tests in a window before opening, so a problem shows up before a photo session instead of during one. It takes a few seconds and happens once per version. The result is written to `Documents\FotoNxenesit\kontrolli.txt`: the date, the version, and how many checks passed, failed or were skipped. If a check fails, the failed checks are named there, pytest's full report is saved next to it as `kontrolli-raporti.txt`, and the check runs again on the next start. From source, `py foto_nxenesit.py --kontrollo` shows that window.
 
 GitHub Actions runs the tests and builds the `.exe` on every push to `main`. Pushing a tag that starts with `v` (for example `v1.0.0`) also publishes the `.exe` as a release.
 

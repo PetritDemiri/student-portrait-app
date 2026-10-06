@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1 – 2026-10-06
+
+### Changed
+- `kontrolli.txt` records the whole result of the self-check instead of only the version: the date, the version, the result, how many checks there were and how many passed, failed or were skipped, how long it took, and the system it ran on. A failed check is written down too, with the names of the failed checks, and the check runs again on the next start.
+- The check is skipped only when the record shows that this version passed with no failures.
+
 ## 1.4.0 – 2026-10-06
 
 ### Added

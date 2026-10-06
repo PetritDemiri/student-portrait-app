@@ -209,11 +209,57 @@ def test_no_time():
 
 
 # ------------------------------------------------------------------ self-check on the first start of a version
-def test_the_exe_checks_once_per_version(tmp_path):
+def check_result(passed=3, failed=(), skipped=0):
+    failed = list(failed)
+    return app.CheckResult(total=passed + len(failed) + skipped, passed=passed, failed=failed, skipped=skipped,
+                           report="", exit_code=1 if failed else 0, seconds=2.4)
+
+
+def test_the_exe_checks_each_version_until_it_passes(tmp_path):
     assert app.check_needed(folder=tmp_path, frozen=True)
-    app.remember_checked_version(tmp_path)
+    app.write_check_record(check_result(failed=["tests/test_helpers.py::test_one"]), folder=tmp_path)
+    assert app.check_needed(folder=tmp_path, frozen=True), "a failed check runs again"
+    app.write_check_record(check_result(), folder=tmp_path)
     assert not app.check_needed(folder=tmp_path, frozen=True)
-    (tmp_path / app.CHECK_RECORD).write_text("1.0.0", encoding="utf-8")  # an older version passed before
+    record = tmp_path / app.CHECK_RECORD
+    record.write_text(app.read_text(record).replace(f"Versioni: {app.APP_VERSION}", "Versioni: 1.0.0"),
+                      encoding="utf-8")
+    assert app.check_needed(folder=tmp_path, frozen=True), "a pass of an older version does not count"
+
+
+def test_a_record_with_only_the_version_is_checked_again(tmp_path):
+    (tmp_path / app.CHECK_RECORD).write_text(app.APP_VERSION, encoding="utf-8")  # how 1.3.0 to 1.4.0 wrote it
+    assert app.check_needed(folder=tmp_path, frozen=True)
+
+
+def test_the_record_lists_the_whole_result(tmp_path):
+    report = tmp_path / app.CHECK_REPORT
+    app.write_check_record(check_result(passed=74, failed=["tests/test_helpers.py::test_one[X-1]"], skipped=1),
+                           report=report, folder=tmp_path)
+    data = (tmp_path / app.CHECK_RECORD).read_bytes()
+    assert data.startswith(b"\xef\xbb\xbf") and b"\r\n" in data, "UTF-8 with BOM and Windows line endings"
+    lines = app.read_text(tmp_path / app.CHECK_RECORD).splitlines()
+    assert lines[0] == "Kontrolli i programit" and lines[1].startswith("Data: ")
+    assert lines[2:10] == [f"Versioni: {app.APP_VERSION}", "Gjendja: Disa kontrolle dështuan", "Gjithsej: 76",
+                           "Kaluan: 74", "Dështuan: 1", "  - test_one[X-1]", "U anashkaluan: 1",
+                           "Kohëzgjatja: 2,4 sekonda"]
+    assert lines[10].startswith("Sistemi: ") and lines[11] == f"Raporti i plotë: {report}"
+    fields = app.read_check_record(tmp_path)
+    assert fields["Versioni"] == app.APP_VERSION and fields["Dështuan"] == "1" and fields["U anashkaluan"] == "1"
+
+
+def test_the_record_of_a_passed_check(tmp_path):
+    app.write_check_record(check_result(passed=76), folder=tmp_path)
+    fields = app.read_check_record(tmp_path)
+    assert (fields["Gjendja"], fields["Gjithsej"], fields["Kaluan"], fields["Dështuan"]) == (
+        "Të gjitha kaluan", "76", "76", "0")
+
+
+def test_the_record_of_a_check_that_could_not_run(tmp_path):
+    app.write_check_record(RuntimeError("pytest mungon"), folder=tmp_path)
+    fields = app.read_check_record(tmp_path)
+    assert fields["Gjendja"] == "Kontrolli nuk mund të kryhej"
+    assert fields["Arsyeja"] == "RuntimeError: pytest mungon"
     assert app.check_needed(folder=tmp_path, frozen=True)
 
 
@@ -229,13 +275,16 @@ def test_from_source_only_when_asked(tmp_path):
 
 def test_self_check_counts_tests_and_names_failures(tmp_path):
     (tmp_path / "test_sample.py").write_text(
-        "def test_passes():\n    assert 1 + 1 == 2\n\n\ndef test_fails():\n    assert 1 + 1 == 3\n", encoding="utf-8")
+        "import pytest\n\n\n"
+        "def test_passes():\n    assert 1 + 1 == 2\n\n\n"
+        "def test_fails():\n    assert 1 + 1 == 3\n\n\n"
+        "@pytest.mark.skip(reason='not here')\ndef test_skipped():\n    pass\n", encoding="utf-8")
     progress = []
     result = app.run_self_check(tmp_path, lambda done, total: progress.append((done, total)))
-    assert result.total == 2
+    assert (result.total, result.passed, result.skipped) == (3, 1, 1)
     assert [nodeid.split("::")[-1] for nodeid in result.failed] == ["test_fails"]
-    assert not result.ok
-    assert progress[0] == (0, 2) and progress[-1] == (2, 2)
+    assert not result.ok and result.seconds > 0
+    assert progress[0] == (0, 3) and progress[-1] == (3, 3)
 
 
 # ------------------------------------------------------------------ saved classes: reading and editing

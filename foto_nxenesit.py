@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import platform
 import queue
 import re
 import shutil
@@ -51,7 +52,7 @@ import customtkinter as ctk
 
 # ------------------------------------------------------------------ settings
 APP_NAME = "Foto Nxënësit"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 TXT_ENCODING = "utf-8-sig"  # UTF-8 with BOM: ë and ç show correctly in Notepad, Word and Excel
 AUTO_CAPITALIZE = True      # "arta krasniqi" is saved as "Arta Krasniqi"
 DRAFT_FILE = "_klasa e papërfunduar.txt"  # autosave of the class in progress, inside the school folder
@@ -549,8 +550,11 @@ def open_in_notepad(path: Path) -> None:
 
 
 # ------------------------------------------------------------------ self-check on the first start of a version
-CHECK_RECORD = "kontrolli.txt"          # the version that last passed the self-check
-CHECK_REPORT = "kontrolli-raporti.txt"  # written when a check fails
+CHECK_RECORD = "kontrolli.txt"          # the result of the last self-check: version, date, counts
+CHECK_REPORT = "kontrolli-raporti.txt"  # pytest's full output, written when a check fails
+CHECK_PASSED = "Të gjitha kaluan"
+CHECK_FAILED = "Disa kontrolle dështuan"
+CHECK_NOT_RUN = "Kontrolli nuk mund të kryhej"
 
 
 def app_data_dir() -> Path:
@@ -567,39 +571,81 @@ def tests_dir() -> Path:
     return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "tests"
 
 
-def checked_version(folder: Path | None = None) -> str:
-    try:
-        return ((folder or app_data_dir()) / CHECK_RECORD).read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+@dataclass
+class CheckResult:
+    total: int
+    passed: int
+    failed: list[str]  # the ids of the checks that failed
+    skipped: int
+    report: str        # pytest's output
+    exit_code: int
+    seconds: float = 0.0
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0 and self.passed > 0 and not self.failed
 
 
-def remember_checked_version(folder: Path | None = None) -> None:
+def count_checks(n: int) -> str:
+    return "1 kontroll" if n == 1 else f"{n} kontrolle"
+
+
+def seconds_text(seconds: float) -> str:
+    return f"{seconds:.1f}".replace(".", ",") + " sekonda"
+
+
+def check_record_lines(result, when: datetime, report: Path | None = None) -> list[str]:
+    """kontrolli.txt: what the self-check of this version found."""
+    lines = ["Kontrolli i programit", f"Data: {when:%d.%m.%Y %H:%M:%S}", f"Versioni: {APP_VERSION}"]
+    if isinstance(result, CheckResult) and result.total:
+        lines += [f"Gjendja: {CHECK_PASSED if result.ok else CHECK_FAILED}",
+                  f"Gjithsej: {result.total}",
+                  f"Kaluan: {result.passed}",
+                  f"Dështuan: {len(result.failed)}"]
+        lines += [f"  - {nodeid.split('::', 1)[-1]}" for nodeid in result.failed]
+        lines += [f"U anashkaluan: {result.skipped}",
+                  f"Kohëzgjatja: {seconds_text(result.seconds)}"]
+    else:
+        reason = (f"{type(result).__name__}: {result}" if isinstance(result, Exception)
+                  else "nuk u gjet asnjë kontroll")
+        lines += [f"Gjendja: {CHECK_NOT_RUN}", f"Arsyeja: {reason}"]
+    lines.append(f"Sistemi: {platform.platform()}, Python {platform.python_version()}")
+    if report is not None:
+        lines.append(f"Raporti i plotë: {report}")
+    return lines
+
+
+def write_check_record(result, report: Path | None = None, folder: Path | None = None) -> None:
     folder = folder or app_data_dir()
     with contextlib.suppress(OSError):
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / CHECK_RECORD).write_text(APP_VERSION, encoding="utf-8")
+        write_lines(folder / CHECK_RECORD, check_record_lines(result, datetime.now(), report))
+
+
+def read_check_record(folder: Path | None = None) -> dict[str, str]:
+    """The fields of kontrolli.txt ("Versioni" -> "1.4.1" ...). Empty when there is none."""
+    try:
+        text = read_text((folder or app_data_dir()) / CHECK_RECORD)
+    except OSError:
+        return {}
+    fields = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() and not line.startswith(" "):
+            fields.setdefault(key.strip(), value.strip())
+    return fields
 
 
 def check_needed(force: bool = False, folder: Path | None = None, frozen: bool | None = None) -> bool:
-    """True on the first start of each new version of the .exe (or when asked with --kontrollo)."""
+    """True on the first start of each new version of the .exe, until its check passes
+    (or when asked with --kontrollo)."""
     if force:
         return True
     if not (is_frozen() if frozen is None else frozen):
         return False  # from source, the tests are run with pytest instead
-    return checked_version(folder) != APP_VERSION
-
-
-@dataclass
-class CheckResult:
-    total: int
-    failed: list[str]
-    report: str
-    exit_code: int
-
-    @property
-    def ok(self) -> bool:
-        return self.exit_code == 0 and self.total > 0 and not self.failed
+    record = read_check_record(folder)
+    return not (record.get("Versioni") == APP_VERSION and record.get("Gjendja") == CHECK_PASSED
+                and record.get("Dështuan") == "0")
 
 
 def run_self_check(folder: Path, on_progress=None) -> CheckResult:
@@ -613,7 +659,7 @@ def run_self_check(folder: Path, on_progress=None) -> CheckResult:
     class Progress:
         def __init__(self):
             self.total = self.done = 0
-            self.failed: list[str] = []
+            self.outcomes: dict[str, str] = {}
 
         def pytest_collection_finish(self, session):
             self.total = len(session.items)
@@ -621,8 +667,12 @@ def run_self_check(folder: Path, on_progress=None) -> CheckResult:
                 on_progress(0, self.total)
 
         def pytest_runtest_logreport(self, report):
-            if report.failed and report.nodeid not in self.failed:
-                self.failed.append(report.nodeid)
+            if report.failed:
+                self.outcomes[report.nodeid] = "failed"  # a failure in any phase counts
+            elif report.skipped:
+                self.outcomes.setdefault(report.nodeid, "skipped")
+            elif report.when == "call":
+                self.outcomes.setdefault(report.nodeid, "passed")
             if report.when == "teardown":
                 self.done += 1
                 if on_progress:
@@ -631,6 +681,7 @@ def run_self_check(folder: Path, on_progress=None) -> CheckResult:
     progress, output = Progress(), io.StringIO()
     autoload = os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD")
     os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    started = time.monotonic()
     try:
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             code = pytest.main([str(folder), "-q", "-p", "no:cacheprovider", "-p", "no:faulthandler",
@@ -640,7 +691,13 @@ def run_self_check(folder: Path, on_progress=None) -> CheckResult:
             os.environ.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
         else:
             os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = autoload
-    return CheckResult(progress.total, progress.failed, output.getvalue(), int(code))
+    outcomes = progress.outcomes.values()
+    return CheckResult(total=progress.total,
+                       passed=sum(1 for o in outcomes if o == "passed"),
+                       failed=[nodeid for nodeid, o in progress.outcomes.items() if o == "failed"],
+                       skipped=sum(1 for o in outcomes if o == "skipped"),
+                       report=output.getvalue(), exit_code=int(code),
+                       seconds=time.monotonic() - started)
 
 
 # ------------------------------------------------------------------ dialogs
@@ -1016,14 +1073,21 @@ class App(ctk.CTk):
     def _finish_check(self, result) -> None:
         if isinstance(result, CheckResult) and result.ok:
             if is_frozen():
-                remember_checked_version()
+                write_check_record(result)
             self.check_bar.set(1)
             self.check_count.configure(text=f"Kontrolli {result.total} nga {result.total}")
-            self.check_result.configure(text=f"{result.total} kontrolle, të gjitha në rregull.", text_color=GREEN)
+            if result.skipped:
+                skipped = "1 u anashkalua" if result.skipped == 1 else f"{result.skipped} u anashkaluan"
+                done = f"{count_checks(result.passed)} në rregull, {skipped}."
+            else:
+                done = f"{count_checks(result.total)}, të gjitha në rregull."
+            self.check_result.configure(text=done, text_color=GREEN)
             self.button(self.check_buttons, "Vazhdo", "ink", self._leave_check, height=54, size=17,
                         width=540).pack(fill="x")
         else:
             report = self._save_check_report(result)
+            if is_frozen():
+                write_check_record(result, report)  # not a pass, so the check runs again next time
             if isinstance(result, CheckResult) and result.total and result.failed:
                 n = len(result.failed)
                 headline = (f"1 nga {result.total} kontrolle dështoi." if n == 1 else
